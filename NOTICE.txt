@@ -1,0 +1,47 @@
+DingHai marine-background basemap / GSHHG product generator python-product-2
+
+GSHHG 2.3.7: Paul Wessel and Walter H. F. Smith.
+Official native binary source:
+https://www.soest.hawaii.edu/pwessel/gshhg/gshhg-bin-2.3.7.zip
+118617033 bytes; SHA-256:
+28600e8f7a08645aab43079326df6504212ec5ccb2b4bcf3b5f4f12ed60e82bc
+
+GSHHG is LGPL-3.0-or-later. This transformed resource uses version 3.
+The official permission/disclaimer notice and full GNU LGPLv3 and GPLv3
+texts are in Licenses/. Retain them with distribution.
+
+Marine Imagery's generation portions were modified on 2026-10-09:
+official native-binary parsing; five resolutions and three typed families;
+L5 ice-front land / L6 exclusion; original-path-only strokes; schema 2;
+bounded disk spool; input/member identities and independent release audit.
+Modified on 2026-10-10: marine-background cutover to five coast inputs only;
+remove river/border production and inland L2–4 strokes; retain all five LODs
+of land/lake fills, L1 sea/island outlines, L5 land conversion, L6 exclusion
+and original-path-only polar strokes without reducing retained precision.
+Metadata and independent audit now describe and enforce this reduced scope.
+The standalone generator, audit and tests are offered under LGPL-3.0-only.
+Projection, world splitting and encoding originate in the existing
+Marine Imagery Python producer; this is not the App's Clipper converter.
+
+Only this minimal generator/source package is offered for corresponding
+source. No private App, accounts, chart tools or repository history is
+included or licensed by this notice. Fixed build instructions and source
+input identity are in README.md. Offer equivalent access to this source
+package for the exact data version; do not rely on publishing the private
+repository. Payload and manifest remain Cloudflare-only, with existing file
+entry point https://resources.dinghai.app/gshhg/manifest.json. New-version
+corresponding source and licenses use only the adopted independent minimal
+GitHub repository, planned at
+https://github.com/jkqq147-team/dinghai-basemap-generator.
+Use datasetVersion gshhg-2.3.7-python-product-2 as its fixed tag/release and
+attach gshhg-product-2.3.7-python-product-2-source.zip to that release.
+No App, whole Marine Imagery repository or basemap payload ZIP is published
+there. Planned links are not claims that the repository or release is live;
+independent review and separate publication are required.
+The adopted App source/license entry is its existing legal notices, not the
+offline chart page or a required resource HTML page. This tool does not make
+that App change, create a repository, push or upload. Do not add a new-version
+CF source fallback or remove existing v1 CF source.
+
+General geographic basemap only; not an ENC or navigation chart.
+No warranty, support or promise of suitability for navigation.

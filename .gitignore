@@ -1,0 +1,10 @@
+.worktrees/
+.venv/
+__pycache__/
+*.py[cod]
+*.sqlite
+*.sqlite-*
+*.zip
+.env*
+.dev.vars*
+.DS_Store

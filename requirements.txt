@@ -1,0 +1,2 @@
+shapely==2.0.6 --hash=sha256:83b94a44ab04a90e88be69e7ddcc6f332da7c0a0ebb1156e1c4f568bbec983c3
+numpy==2.5.3 --hash=sha256:f59a878c33d6b88122d80d239bb3b845d58708750b0cb06a09aebb9b18ec696c
