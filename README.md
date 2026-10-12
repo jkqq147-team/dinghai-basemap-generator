@@ -118,24 +118,28 @@ routing, marine-only scope, five official source members, counts, polar
 strokes and necessary full-resolution land/sea controls.
 It is not a proof of exhaustive worldwide geography or App display behavior.
 
-**Payload/manifest hosting decision: Cloudflare only.** The existing resource root is
+**Payload/manifest hosting decision: Cloudflare only.** The resource root is
 `https://resources.dinghai.app/gshhg/`, with the file entry point
-`https://resources.dinghai.app/gshhg/manifest.json`. This new immutable version
-is generated locally; its publication and App contract cutover require separate
-review and authorization. The adopted corresponding-source host is one
-**independent minimal GitHub repository**, planned at
-`https://github.com/jkqq147-team/dinghai-basemap-generator`. It contains only
+`https://resources.dinghai.app/gshhg/manifest.json`. That manifest declares
+datasetVersion `gshhg-2.3.7-python-product-2` with payload
+`https://resources.dinghai.app/gshhg/releases/gshhg-2.3.7-python-product-2/gshhg-2.3.7-python-product-2.zip`
+(82470346 bytes, SHA-256
+`0389dd824f875179048d8aa1165a8d194d2407e875360a87fe272a376a7000b3`).
+The corresponding-source host is one **independent minimal public GitHub
+repository**, `https://github.com/jkqq147-team/dinghai-basemap-generator`. It contains only
 this standalone generator, audit, necessary tests/fixtures, rebuild instructions,
 dependency lock and licenses, never the DingHai App or all of Marine Imagery.
 For each dataset version, use the same fixed tag/release and attach the matching
 minimal source ZIP. No basemap payload ZIP is uploaded to GitHub, and there is
 no CF source fallback or second payload source for this new version.
 
-The draft manifest records measured version/artifact identities and planned
-GitHub source/license links for `gshhg-2.3.7-python-product-2`. The repository,
-tag/release and files are created/published only after independent review;
-these links are not a claim of current public availability. The final CF
-payload URL remains for the separate delivery phase:
+The fixed tag `gshhg-2.3.7-python-product-2` points at commit
+`51e1c2fd33c139d4b6f3972d0e71b6d4ef68752b`. Its published GitHub release
+carries `gshhg-product-2.3.7-python-product-2-source.zip` (2680446 bytes,
+SHA-256 `159d67ddceb98133706d651a40968ff5d6a893d6c117b048c6adf4ee903d306f`).
+The CF manifest's `correspondingSource` names that release asset with the same
+bytes and SHA-256; its `noticeURL` and `licenseURLs` point at `NOTICE.txt` and
+`Licenses/` at the fixed tag:
 
 ```text
 dataset/tag/release: gshhg-2.3.7-python-product-2
@@ -144,17 +148,25 @@ dataset/tag/release: gshhg-2.3.7-python-product-2
   GitHub fixed tag    → NOTICE.txt / Licenses/
 ```
 
+The README.md and NOTICE.txt inside that tag and source ZIP were written before
+publication and still describe these links as planned and unpublished. They are
+left unchanged so the published tag and ZIP stay fixed; this text on `main`
+describes the published state.
+
 Corresponding source and licenses must remain accessible for the exact data
 version, without relying on a resource HTML page or a source/license entry
-on the offline chart page. The adopted App entry is its existing legal notices;
-the offline chart page retains basemap download management. Moving its source
-link is a separate App step, not work performed here.
+on the offline chart page. The DingHai App reads this manifest and accepts only
+the marine-background scope. Since App commit `b5d94ab`, the GSHHG section of
+its existing legal notices links the installed basemap's manifest
+`correspondingSource` URL, labelled with its dataset version; the offline chart
+page no longer carries that link and retains basemap download management.
+This repository makes no App change.
 No App support/privacy page or broader privacy/legal work is part of this release.
-Do not overwrite python-product-1 artifacts or infer that version 2 is already
-hosted; do not delete the existing v1 CF source. This tool neither reads
-credentials nor creates repositories, pushes, uploads, deploys or creates
-services. Do not publish the private repository or unrelated tools. Anonymous
-resource delivery is not a promise that a host cannot see request metadata.
+Do not overwrite python-product-1 artifacts; do not delete the existing v1 CF
+source. This tool neither reads credentials nor creates repositories, pushes,
+uploads, deploys or creates services. Do not publish the private repository or
+unrelated tools. Anonymous resource delivery is not a promise that a host
+cannot see request metadata.
 
 A fixed product can remain static. Regenerate only for an adopted official-data
 version, a conversion fix or a reader-format change; keep download links and
