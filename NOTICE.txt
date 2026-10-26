@@ -48,3 +48,31 @@ remove existing v1 CF source.
 
 General geographic basemap only; not an ENC or navigation chart.
 No warranty, support or promise of suitability for navigation.
+
+----------------------------------------------------------------------
+DingHai Seamap land cells / land_product.py land-product-1
+
+Land layers (landuse, roads, peaks, places): © OpenStreetMap contributors
+· Protomaps. Derived from a Protomaps basemap build (OpenStreetMap data,
+https://www.openstreetmap.org/copyright), available under the Open Database
+License 1.0: https://opendatacommons.org/licenses/odbl/1-0/ — full text in
+Licenses/ODbL-1.0.txt (official plain text, opendatacommons.org, retrieved
+2026-10-25). This repository publishes the method used to derive the cells
+(ODbL 4.6); the Protomaps build, its version and SHA-256 are recorded in
+each release manifest and cell.
+
+Depth layer: GEBCO Bathymetric Compilation Group 2026 (2026). The
+GEBCO_2026 Grid - a continuous terrain model for oceans and land at 15
+arc-second intervals. doi:10.5285/4f68d5c7-45eb-f999-e063-7086abc036fa.
+The GEBCO Grid is placed in the public domain; terms of use in
+Licenses/GEBCO-terms-of-use.txt (https://www.gebco.net/data-products/
+gridded-bathymetry/terms-of-use, retrieved 2026-10-25). No official status
+or GEBCO/IHO/IOC endorsement is implied.
+
+The depth bands are illustrative: interpolated from the GEBCO grid, not a
+survey, not for navigation (示意、非测量、不可用于导航).
+
+The test fixtures tests/fixtures/protomaps-dachen*.pmtiles and
+tests/fixtures/gebco-dachen.nc are small extracts of the same sources under
+the same terms. land_product.py, audit_land.py, tests/test_land.py and
+tests/fixtures/make_land_fixtures.py are offered under LGPL-3.0-only.
