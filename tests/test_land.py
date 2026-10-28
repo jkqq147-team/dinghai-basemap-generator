@@ -145,6 +145,18 @@ def _flip(path):
 class FragmentTests(unittest.TestCase):
     """A depth fragment across the 214/215 seam is judged by its whole area in both cells."""
 
+    def test_complete_fragment_one_sixteenth_pixel_inside_seam_is_dropped(self):
+        # Review's GEBCO source catches fractional extents missed by integer-border tests:
+        # the complete 280829 m² strip touches only 215/106, not its western neighbour.
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            protomaps, peaks = root / "protomaps.pmtiles", root / "peaks.pmtiles"
+            lp.write_pmtiles(protomaps, {}, {}, (-180, -85, 180, 85), 0, 12)
+            lp.write_pmtiles(peaks, {}, {"dinghai:peakZooms": [13]}, (-180, -85, 180, 85), 13, 13)
+            tiles, _ = lp.build_cell(lp.Archive(protomaps), lp.Archive(peaks),
+                                     lp.Gebco(FIXTURES / "gebco-fractional.nc"), 215, 106)
+        self.assertFalse(tiles, "a complete sub-km² component must produce no depth tiles")
+
     def _keep_all(self, bump):
         return self.build(bump, {(214, 106): 0, (215, 106): 0})
 
@@ -306,6 +318,30 @@ class FragmentTests(unittest.TestCase):
 
 
 class ContourTests(unittest.TestCase):
+    def test_snapped_neck_does_not_leave_a_complete_sub_km2_fragment(self):
+        # Existing seam/window tests have no collapsing neck: rounding must not leave
+        # a small orphan after its large parent passed the shared-window area rule.
+        cx, cy, zoom = 222, 135, 9
+        pooled = {}
+        for z in range(8, 13):
+            stride = 1 << (12 - z)
+            n = (lp.CELL_PX + 2 * lp.FRAGMENT_WINDOW_PX) // stride + 1
+            depth = np.zeros((n, n), np.float32)
+            if z == zoom:
+                depth[200:220, 200:220] = 40
+                depth[209:212, 230:233] = 40
+                depth[210, 220:230] = 20.01
+            pooled[z] = depth, np.full_like(depth, 1000)
+        features = lp.depth_tiles(pooled, cx, cy)
+        decoded = {key: audit_land.decode_tile(lp.encode_layers(
+            [{"name": "depth", "features": fs}], lp.EXTENT)) for key, fs in features.items()}
+        parts = [(x, y, rings) for (z, x, y), layers in decoded.items() if z == zoom
+                 for _, props, rings in layers["depth"][1] if props["min"] == 20]
+        region = shapely.union_all(audit_land.depth_polygons(parts, zoom))
+        origin = np.array([cx, cy]) * lp.CELL_PX - lp.FRAGMENT_WINDOW_PX
+        self.assertTrue(region.covers(shapely.Point(*(origin + np.array([210, 210]) * 8))))
+        self.assertFalse(region.covers(shapely.Point(*(origin + np.array([231, 210]) * 8))))
+
     def test_pit_whose_rounded_hole_touches_the_shell_stays_a_hole(self):
         # Regression (Hong Kong sample): after rounding, a pit's hole ring shares a stretch
         # of the shell; Polygon(shell, holes) + make_valid then returned the shell without
@@ -414,6 +450,34 @@ class FragmentPropertyTests(unittest.TestCase):
 
 
 class SeamTests(unittest.TestCase):
+    def test_original_gebco_shallow_node_between_z12_nodes_is_not_coloured(self):
+        # Existing smooth-grid coverage misses the resampling regression: a 4 m knot
+        # surrounded by 1000 m nodes can be shallower than every integer z12 sample.
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            protomaps, peaks, gebco = _synthetic_two_cells(root, 215 * lp.CELL_PX)
+            with netCDF4.Dataset(gebco, "a") as ds:
+                lat, lon = ds["lat"][:], ds["lon"][:]
+                xs = (lon + 180) / 360 * (256 << 12)
+                ys = (1 - np.arcsinh(np.tan(np.radians(lat))) / np.pi) / 2 * (256 << 12)
+                cols = np.flatnonzero((lon > 121) & (lon < 121.5))
+                rows = np.flatnonzero((lat > 29) & (lat < 29.3))
+                j = cols[np.argmax(np.abs(xs[cols] - np.round(xs[cols])))]
+                i = rows[np.argmax(np.abs(ys[rows] - np.round(ys[rows])))]
+                ds["elevation"][:] = -1000
+                ds["elevation"][i, j] = -4
+                point = shapely.Point(float(xs[j]), float(ys[i]))
+            tiles, _ = lp.build_cell(lp.Archive(protomaps), lp.Archive(peaks), lp.Gebco(gebco), 214, 106)
+            decoded = {lp.tileid_to_zxy(t): audit_land.decode_tile(gzip.decompress(v))
+                       for t, v in tiles.items()}
+        for zoom in range(8, 13):
+            with self.subTest(zoom=zoom):
+                parts = [(x, y, rings) for (z, x, y), layers in decoded.items() if z == zoom
+                         for _, props, rings in layers.get("depth", (0, []))[1] if props["min"] == 20]
+                region = shapely.union_all(audit_land.depth_polygons(parts, zoom))
+                self.assertGreater(region.area, 0)
+                self.assertFalse(region.covers(point))
+
     def test_adjacent_cells_agree_on_depth_at_the_seam(self):
         # Each cell is generated alone; land and depth near the shared edge must come out the
         # same from both sides at every zoom (neighbour land in the offshore distance, no

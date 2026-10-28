@@ -56,7 +56,6 @@ MIN_FRAGMENT_M2 = 1_000_000  # pieces smaller than this are dropped (holes kept)
 DEPTH_MARGIN_M = 2.0         # generator-side safety margins, see README
 DISTANCE_MARGIN_PX = 3.0
 DISTANCE_CAP_M = 200.0
-DEPTH_TILE_BUFFER = 4        # lattice nodes beyond an inner tile edge
 MISSING = -1.0e6
 EDT_STRIP = 512             # rows per distance-transform strip (memory bound)
 
@@ -601,6 +600,31 @@ class Gebco:
         c = block[:, j - j0] * (1 - wj) + block[:, j + 1 - j0] * wj
         return c[i - i0] * (1 - wi)[:, None] + c[i + 1 - i0] * wi[:, None]
 
+    def minimum_depth(self, lats, lons):
+        """Exact bilinear minimum in each rectangle between consecutive axis values.
+
+        Split at original GEBCO node lines: each bilinear subrectangle has its
+        minimum at a corner. Longitude knots remain unwrapped; depth() reads their
+        periodic columns, including the last/first-column interval at ±180°.
+        """
+        axes, indices = [], []
+        for edges, origin in ((-np.asarray(lats), -self.lat0), (np.asarray(lons), self.lon0)):
+            lo, hi = edges[0], edges[-1]
+            knots = origin + np.arange(math.ceil((lo - origin) * 240),
+                                       math.floor((hi - origin) * 240) + 1) / 240
+            axis = np.unique(np.concatenate([edges, knots]))
+            axes.append(axis)
+            indices.append(np.searchsorted(axis, edges))
+        values = self.depth(-axes[0], axes[1])
+        for axis, ix in enumerate(indices):
+            # reduceat excludes the next interval's first corner; include that shared
+            # edge explicitly so the rectangles are closed on both sides.
+            reduced = np.minimum.reduceat(values, ix, axis=axis)
+            inner = [slice(None), slice(None)]
+            inner[axis] = slice(None, -1)
+            values = np.minimum(reduced[tuple(inner)], np.take(values, ix[1:], axis=axis))
+        return values
+
 
 # ---------------------------------------------------------------- depth
 
@@ -662,15 +686,16 @@ def land_raster(archive, cx, cy, rings_count, cell_earth):
 
 
 def depth_fields(archive, gebco, cx, cy, cell_earth):
-    """Depth-margin and distance-margin fields on full-resolution nodes of the cell
-    plus WINDOW_PAD, indexed [row, col] with node (cy*4096 - WINDOW_PAD + r, cx*4096 - WINDOW_PAD + c)."""
+    """Exact depth minima on full-resolution pixel rectangles, and distance on nodes.
+    Both start at (cx*4096 - WINDOW_PAD, cy*4096 - WINDOW_PAD); the rectangle
+    field has one fewer row/column than the node field."""
     rings_count = land_raster_rings(cy)
     land, ox, oy = land_raster(archive, cx, cy, rings_count, cell_earth)
     gx0, gy0 = cx * CELL_PX - WINDOW_PAD, cy * CELL_PX - WINDOW_PAD
     size = CELL_PX + 2 * WINDOW_PAD + 1
     rows = np.arange(gy0, gy0 + size)
     cols = np.arange(gx0, gx0 + size)
-    depth = gebco.depth(lat_of_px(rows), lon_of_px(cols))
+    depth = gebco.minimum_depth(lat_of_px(rows), lon_of_px(cols))
     depth_margin = depth - np.float32(DEPTH_MARGIN_M)
     depth_margin[~np.isfinite(depth_margin)] = MISSING
     del depth
@@ -692,29 +717,25 @@ def depth_fields(archive, gebco, cx, cy, cell_earth):
     return depth_margin, distance_margin
 
 
-def _pool(field, s, r):
-    """Minimum over Chebyshev radius r (full-res nodes) at the zoom lattice (stride s) of
-    the cell's fragment window: nodes cell - FRAGMENT_WINDOW_PX .. cell end + FRAGMENT_WINDOW_PX."""
+def _pool(field, s, width):
+    """Minimum at the fragment-window lattice over width entries per axis.
+    A radius r uses 2r pixel rectangles for continuous depth, or 2r+1 distance nodes."""
     lattice = slice(POOL_PAD, POOL_PAD + CELL_PX + 2 * FRAGMENT_WINDOW_PX + 1, s)
-    # Column minimum at lattice columns only (window [c - r, c + r]), then rows.
-    cols = np.arange(POOL_PAD, POOL_PAD + CELL_PX + 2 * FRAGMENT_WINDOW_PX + 1, s)
-    a = field[:, cols - r]
-    for k in range(1 - r, r + 1):
-        np.minimum(a, field[:, cols + k], out=a)
-    return ndimage.minimum_filter1d(a, 2 * r + 1, axis=0, mode="nearest")[lattice, :]
+    a = ndimage.minimum_filter1d(field, width, axis=1, mode="nearest")[:, lattice]
+    return ndimage.minimum_filter1d(a, width, axis=0, mode="nearest")[lattice, :]
 
 
 def pooled_fields(depth_margin, distance_margin):
-    """{z: (depth, distance)} each field min-pooled over radius s+2 at the zoom lattice."""
-    return {z: (_pool(depth_margin, 1 << (FULL_ZOOM - z), (1 << (FULL_ZOOM - z)) + 2),
-                _pool(distance_margin, 1 << (FULL_ZOOM - z), (1 << (FULL_ZOOM - z)) + 2))
+    """{z: (depth, distance)} exact rectangle depth and node distance over radius s+2."""
+    return {z: (_pool(depth_margin, 1 << (FULL_ZOOM - z), 2 * ((1 << (FULL_ZOOM - z)) + 2)),
+                _pool(distance_margin, 1 << (FULL_ZOOM - z), 2 * ((1 << (FULL_ZOOM - z)) + 2) + 1))
             for z in range(MIN_ZOOM, MAX_ZOOM + 1)}
 
 
 def component_whole(lo, hi):
     """Whether a component's complete extent is strictly inside every cell window that
-    could draw it. Cell extents include shared seam nodes: the first cell is
-    (lo - 1) // CELL_PX and the last is hi // CELL_PX, so a seam node belongs to both.
+    could draw it. Continuous closed extents touch cells from ceil(lo / CELL_PX) - 1
+    through floor(hi / CELL_PX), so an exact seam point belongs to both cells.
     Non-finite bounds denote an extent clipped by the observation window, not a complete
     component. This one component-level predicate is the keep/drop invariant: complete
     small components are dropped everywhere; clipped or non-fitting ones are kept."""
@@ -722,7 +743,7 @@ def component_whole(lo, hi):
     hi = np.asarray(hi, dtype=float)
     known = np.isfinite(lo) & np.isfinite(hi)
     safe_lo, safe_hi = np.where(known, lo, 0.0), np.where(known, hi, 0.0)
-    first = np.floor((safe_lo - 1) / CELL_PX)
+    first = np.ceil(safe_lo / CELL_PX) - 1
     last = np.floor(safe_hi / CELL_PX)
     return (known & (lo > last * CELL_PX - FRAGMENT_WINDOW_PX)
             & (hi < (first + 1) * CELL_PX + FRAGMENT_WINDOW_PX))
@@ -731,60 +752,46 @@ def component_whole(lo, hi):
 def depth_tiles(pooled, cx, cy):
     """{(z, x, y): [feature]} depth features in 4096 tile units.
 
-    Fragments: 4-connected components of positive lattice nodes are found on the cell's
-    fragment window. A component that does not touch this window's border and whose node
-    bounding box fits the window of every cell it touches is seen whole, identically, by
-    each of those cells and is kept only if its fully-positive squares cover
-    >= MIN_FRAGMENT_M2; any other component reaches beyond what a neighbour can see and
-    is kept, in every cell that sees it."""
+    Judge connected vector components after final snapping on the shared fragment
+    window, before clipping tiles. A component is area-filtered only if it is
+    complete in every touched cell's window."""
     out = {}
-    four = ndimage.generate_binary_structure(2, 1)
     for z in range(MIN_ZOOM, MAX_ZOOM + 1):
         s = 1 << (FULL_ZOOM - z)
         pooled_depth, pooled_distance = pooled.pop(z)
         pad = FRAGMENT_WINDOW_PX // s          # lattice nodes before the cell's first node
-        cell_nodes = CELL_PX // s + 1
-        gx0, gy0 = cx * CELL_PX - FRAGMENT_WINDOW_PX, cy * CELL_PX - FRAGMENT_WINDOW_PX
-        rows_n = pooled_depth.shape[0]
-        row_gy = gy0 + np.arange(rows_n - 1) * s
-        square_m2 = (s * np.minimum(mpp_of_px(row_gy), mpp_of_px(row_gy + s))) ** 2
+        xs = (np.arange(pooled_depth.shape[1]) - pad) * 16.0
+        ys = (np.arange(pooled_depth.shape[0]) - pad) * 16.0
         n = 1 << (z - GRID_ZOOM)
         for band in DEPTH_BANDS_M:
             g = np.minimum(pooled_depth - np.float32(band), pooled_distance)
-            positive = g > 0
-            if not positive.any():
+            if not (g > 0).any():
                 continue
-            labels, count = ndimage.label(positive, structure=four)
-            full = positive[:-1, :-1] & positive[1:, :-1] & positive[:-1, 1:] & positive[1:, 1:]
-            sq_rows = np.nonzero(full)[0]
-            area = np.bincount(labels[:-1, :-1][full], weights=square_m2[sq_rows], minlength=count + 1)
-            boxes = ndimage.find_objects(labels)
-            r0 = np.array([b[0].start for b in boxes]); r1 = np.array([b[0].stop - 1 for b in boxes])
-            c0 = np.array([b[1].start for b in boxes]); c1 = np.array([b[1].stop - 1 for b in boxes])
-            # Convert a border-clipped observation into an unknown extent. The predicate
-            # itself then depends only on the component, never on which cell is asking.
-            x_lo = np.where(c0 == 0, -np.inf, gx0 + c0 * s)
-            x_hi = np.where(c1 == pooled_depth.shape[1] - 1, np.inf, gx0 + c1 * s)
-            y_lo = np.where(r0 == 0, -np.inf, gy0 + r0 * s)
-            y_hi = np.where(r1 == rows_n - 1, np.inf, gy0 + r1 * s)
-            whole = component_whole(x_lo, x_hi) & component_whole(y_lo, y_hi)
-            keep = np.concatenate([[False], (area[1:] >= MIN_FRAGMENT_M2) | ~whole])
-            g[positive & ~keep[labels]] = MISSING
-            g = g[pad:pad + cell_nodes, pad:pad + cell_nodes]
-            nodes = cell_nodes
+            region = contour_region(xs, ys, g)
+            if region is None:
+                continue
+            kept = []
+            for p in _polygonal(region):
+                x0, y0, x1, y1 = p.bounds
+                lo_x = -np.inf if x0 == xs[0] else cx * CELL_PX + x0 * s / 16
+                hi_x = np.inf if x1 == xs[-1] else cx * CELL_PX + x1 * s / 16
+                lo_y = -np.inf if y0 == ys[0] else cy * CELL_PX + y0 * s / 16
+                hi_y = np.inf if y1 == ys[-1] else cy * CELL_PX + y1 * s / 16
+                whole = component_whole(lo_x, hi_x) & component_whole(lo_y, hi_y)
+                rows = cy * CELL_PX + np.array([y0, y1]) * s / 16
+                area = p.area * (s / 16 * float(mpp_of_px(rows).min())) ** 2
+                if area >= MIN_FRAGMENT_M2 or not whole:
+                    kept.append(p)
+            if not kept:
+                continue
+            region = unary_union(kept)
             for i in range(n):
                 for j in range(n):
-                    a0 = max(i * 256 - DEPTH_TILE_BUFFER, 0)
-                    a1 = min((i + 1) * 256 + DEPTH_TILE_BUFFER, nodes - 1)
-                    b0 = max(j * 256 - DEPTH_TILE_BUFFER, 0)
-                    b1 = min((j + 1) * 256 + DEPTH_TILE_BUFFER, nodes - 1)
-                    sub = g[b0:b1 + 1, a0:a1 + 1]
-                    if not (sub > 0).any():
-                        continue
-                    xs = (np.arange(a0, a1 + 1) - i * 256) * 16.0
-                    ys = (np.arange(b0, b1 + 1) - j * 256) * 16.0
-                    geom = contour_region(xs, ys, sub)
-                    if geom is not None:
+                    tile = shapely.box(i * EXTENT, j * EXTENT, (i + 1) * EXTENT, (j + 1) * EXTENT)
+                    pieces = _polygonal(region.intersection(tile))
+                    if pieces:
+                        geom = unary_union(pieces)
+                        geom = affinity.translate(geom, -i * EXTENT, -j * EXTENT)
                         out.setdefault((z, cx * n + i, cy * n + j), []).append(
                             {"geometry": geom, "properties": {"min": band}})
     return out

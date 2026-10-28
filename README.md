@@ -266,15 +266,29 @@ contouring, generalising and MVT rounding can only shrink a band: +2 m depth,
 minimum over a Chebyshev radius *s*+2. The land mask includes 1–3 rings of
 neighbouring z12 tiles (at least 1.25 × 1.7 km at the cell's latitude), so a cell
 sees the same coast as its neighbours, and GEBCO is read beyond the cell, so
-nothing is truncated at the cell edge. Bands are contoured per tile on the
-shared lattice and end exactly on the cell edge; two adjacent cells produce
-the same edge (`tests/test_land.py` seam test).
+nothing is truncated at the cell edge. Depth pooling takes the exact minimum
+of the continuous bilinear GEBCO field over each rectangle, not just its
+integer z12 samples: original GEBCO latitude/longitude node lines split the
+rectangle into bilinear subrectangles whose minima occur at corners. The
+producer enumerates these corners for each z12 pixel rectangle, then pools
+those minima over the requested rectangle. Longitudes wrap periodically at
+±180°; the existing +2 m margin is unchanged. Bands are contoured on the shared
+lattice, snapped, then clipped to tiles and end exactly on the cell edge; two
+adjacent cells produce the same edge (`tests/test_land.py` seam test).
 
 Fragments are judged on a shared window: each cell computes its lattice
 256 z12 px (one z12 tile; ≈8.6 km at 28° N, ≈4.9 km at 60°) beyond its
-edges and finds 4-connected fragments there. The keep/drop decision is a
+edges and finds connected vector components after final integer snapping
+and geometry repair, before clipping to tiles. Area is the snapped polygon
+area (holes subtracted), converted using the minimum ground scale over its
+latitude extent. A narrow connection that collapses during snapping therefore
+leaves separate components, each judged once; there is no pre-snap fragment
+filter. The keep/drop decision is a
 property of the whole component, not of the cell asking: the touched cells
-are those whose closed extents, including shared seam nodes, intersect it.
+are those whose closed extents, including shared seams, intersect it.
+For a continuous closed extent [lo, hi], their indices run from
+ceil(lo / 4096) − 1 through floor(hi / 4096): a point exactly on a seam belongs
+to both cells, but even 1/16 px inside it belongs only to that side.
 Only a complete component strictly inside every one of those cells' windows
 is eligible for area-based dropping; if it covers < 1 km² it is dropped
 everywhere, otherwise it is kept. A component clipped by an observation
@@ -282,7 +296,7 @@ window, or extending beyond the shared measurable window, is kept by every
 cell that draws it. This includes thin fragments extending beyond the window
 even when they touch no border; that is intentional, consistent behaviour.
 Strict inequalities and inclusive seam-cell membership are both required:
-an exact border node is potentially truncated, and a seam-start node belongs
+an exact border point is potentially truncated, and a seam-start point belongs
 to both adjacent cells (`FragmentPropertyTests`).
 
 ### Inputs (one release)
