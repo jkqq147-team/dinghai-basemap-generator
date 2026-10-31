@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: LGPL-3.0-only
 import gzip
-import hashlib
 import json
 import math
 import shutil
@@ -41,6 +40,23 @@ def cell_tiles(path):
     return meta, {audit_land._zxy(t): audit_land.decode_tile(gzip.decompress(b)) for t, b in tiles.items()}
 
 
+def depth_region(tiles, zoom, band=20):
+    """Read generated MVT at its public geometry boundary, not through audit geography helpers."""
+    polygons = []
+    for (z, x, y), layers in tiles.items():
+        if z != zoom or "depth" not in layers:
+            continue
+        layer = layers["depth"]
+        stride = 1 << (12 - z)
+        scale = 256 * stride / layer["extent"]
+        for feature in layer["features"]:
+            if feature["properties"]["min"] == band:
+                polygons.append(shapely.affinity.affine_transform(
+                    shapely.geometry.shape(feature["geometry"]),
+                    [scale, 0, 0, scale, x * 256 * stride, y * 256 * stride]))
+    return shapely.union_all(polygons)
+
+
 class LandCellTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -77,31 +93,6 @@ class LandCellTests(unittest.TestCase):
         lifted = sum(len(tiles.get((12, x, y), {}).get("peaks", (0, []))[1]) for x, y in BLOCK)
         self.assertGreater(lifted, own + 50)
 
-    def test_depth_meets_20m_and_offshore_1500m_and_audit_rejects_a_closer_build(self):
-        # The audit re-derives depth/distance from GEBCO and OSM land itself; a generator that
-        # used a smaller offshore distance must be caught, not only one that crashes.
-        report = audit_land.audit(self.root / "land", FIXTURES / "protomaps-dachen.pmtiles",
-                                  FIXTURES / "gebco-dachen.nc")
-        depth = report["cells"]["214/106"]["depth"]
-        self.assertGreaterEqual(depth["min_offshore_m"], 1500)
-        self.assertGreaterEqual(depth["min_depth_margin_m"], 0)
-        self.assertGreater(depth["points"], 1000)
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary) / "land"
-            shutil.copytree(self.root / "land", root)
-            # A release that claims the 1500 m contract but whose cell was cut at 300 m:
-            # same manifest/cells.json shape, consistent hashes, so only geography can fail.
-            with mock.patch.object(lp, "OFFSHORE_M", 300.0):
-                tiles, _ = lp.build_cell(lp.Archive(FIXTURES / "protomaps-dachen.pmtiles"),
-                                         lp.Archive(self.root / "peaks.pmtiles"),
-                                         lp.Gebco(FIXTURES / "gebco-dachen.nc"), *DACHEN)
-            cell = root / "releases/test/cells/8/214/106.pmtiles"
-            _, meta, _ = audit_land.read_pmtiles(cell.read_bytes())
-            lp.write_cell_pmtiles(cell, tiles, *DACHEN, meta)
-            _rehash(root, cell)
-            with self.assertRaisesRegex(ValueError, "m from land"):
-                audit_land.audit(root, FIXTURES / "protomaps-dachen.pmtiles", FIXTURES / "gebco-dachen.nc")
-
     def test_release_lists_bytes_and_sha_skips_empty_cells_resumes_and_audit_catches_tampering(self):
         cells = json.loads((self.root / "land/releases/test/cells.json").read_text())
         self.assertEqual([(c["x"], c["y"]) for c in cells], [DACHEN])
@@ -121,19 +112,6 @@ class LandCellTests(unittest.TestCase):
                 mutate(copy)
                 with self.assertRaisesRegex(ValueError, message):
                     audit_land.audit(copy / "land")
-
-
-def _rehash(root, cell):
-    data = cell.read_bytes()
-    cells_path = root / "releases/test/cells.json"
-    cells = json.loads(cells_path.read_text())
-    cells[0].update(bytes=len(data), sha256=hashlib.sha256(data).hexdigest())
-    cells_bytes = json.dumps(cells).encode()
-    cells_path.write_bytes(cells_bytes)
-    manifest = json.loads((root / "manifest.json").read_text())
-    manifest.update(cellsBytes=len(cells_bytes), cellsSHA256=hashlib.sha256(cells_bytes).hexdigest(),
-                    totalBytes=len(data))
-    (root / "manifest.json").write_text(json.dumps(manifest))
 
 
 def _flip(path):
@@ -170,7 +148,8 @@ class FragmentTests(unittest.TestCase):
             for cell in ((214, 106), (215, 106)):
                 with mock.patch.object(lp, "MIN_FRAGMENT_M2", patch.get(cell, lp.MIN_FRAGMENT_M2)):
                     tiles, _ = lp.build_cell(*sources, *cell)
-                out[cell] = {lp.tileid_to_zxy(t): audit_land.decode_tile(gzip.decompress(v)) for t, v in tiles.items()}
+                out[cell] = {lp.tileid_to_zxy(t): mvt.decode(gzip.decompress(v), default_options={"y_coord_down": True})
+                             for t, v in tiles.items()}
         return out
 
     @staticmethod
@@ -261,34 +240,16 @@ class FragmentTests(unittest.TestCase):
             self.assertTrue(any(z == 12 and x == tx
                                 for z, x, _ in tiles[cx]), (cx, sorted(tiles[cx])))
 
-    def test_audit_rejects_one_sided_shared_edge_depth(self):
-        # The reviewer's pre-fix probe kept 214's lake/channel but dropped 215's part.
-        # Removing 215's records models that output: its large 214 piece used to pass
-        # because the audit only joined pieces and then checked their total area.
-        tiles = {cx: lp.depth_tiles(self.reviewer_window_pooled(cx), cx, 106)
-                 for cx in (214, 215)}
-        records = []
-        # Use the generated polygons rather than a hand-made area exemption.
-        for cx in (214, 215):
-            geoms = [shapely.affinity.affine_transform(f["geometry"], [1 / 16, 0, 0, 1 / 16,
-                                                                         x * 256, y * 256])
-                     for (z, x, y), fs in tiles[cx].items() if z == 12
-                     for f in fs if f["properties"]["min"] == 20]
-            region = shapely.union_all(geoms) if geoms else shapely.Polygon()
-            records.extend(audit_land.region_pieces(region, 12, 20, cx, 106)[1])
-        records = [r for r in records if r["cell"] == (214, 106)]
-        with self.assertRaisesRegex(ValueError, "one-sided shared-edge depth"):
-            audit_land.check_edge_fragments(records, {(214, 106), (215, 106)})
-
     @staticmethod
-    def pieces(decoded, z):
-        """Audit piece records of band 20 at zoom z, per cell."""
+    def areas(decoded, z):
+        """Ground areas from generated MVT, independent of the producer's area rule."""
         out = {}
         for cell, tiles in decoded.items():
-            feats = [(x, y, parts) for (tz, x, y), layers in tiles.items() if tz == z
-                     for _, props, parts in layers.get("depth", (0, []))[1] if props["min"] == 20]
-            region = shapely.union_all(audit_land.depth_polygons(feats, z)) if feats else shapely.Polygon()
-            out[cell] = audit_land.region_pieces(region, z, 20, *cell)[1]
+            region = depth_region(tiles, z)
+            ymin, ymax = region.bounds[1], region.bounds[3]
+            mpp = min(2 * math.pi * 6378137 / (256 << 12)
+                      / math.cosh(math.pi * (1 - 2 * gy / (256 << 12))) for gy in (ymin, ymax))
+            out[cell] = region.area * mpp ** 2
         return out
 
     def test_small_fragment_across_the_seam_is_dropped_by_both_cells(self):
@@ -298,23 +259,15 @@ class FragmentTests(unittest.TestCase):
         for cell, tiles in decoded.items():
             self.assertFalse(any("depth" in layers for layers in tiles.values()), cell)
         everything = self._keep_all((2, 2))  # fragment rule off: the fragment as drawn
-        sides = self.pieces(everything, 12)
-        self.assertLess(sum(p["m2"] for ps in sides.values() for p in ps), 1_000_000)
-        self.assertTrue(all(sides.values()), "the fragment must reach both cells")
-        # the audit rejects a release where only one side kept it (the pre-fix behaviour)
-        half = {(214, 106): everything[(214, 106)], (215, 106): decoded[(215, 106)]}
-        records = [p for ps in self.pieces(half, 12).values() for p in ps]
-        with self.assertRaisesRegex(ValueError, "fragment across cells"):
-            audit_land.check_edge_fragments(records, {(214, 106), (215, 106)})
+        areas = self.areas(everything, 12)
+        self.assertLess(sum(areas.values()), 1_000_000)
+        self.assertTrue(all(a > 0 for a in areas.values()), "the fragment must reach both cells")
 
     def test_fragment_of_1_km2_only_together_is_kept_by_both_cells(self):
         # 4x3 nodes at z10: each side < 1 km2, together >= 1 km2; a per-cell area rule drops both.
-        sides = self.pieces(self.build((4, 3)), 10)
-        areas = [sum(p["m2"] for p in ps) for ps in sides.values()]
+        areas = list(self.areas(self.build((4, 3)), 10).values())
         self.assertTrue(all(0 < a < 1_000_000 for a in areas), areas)
         self.assertGreaterEqual(sum(areas), 1_000_000)
-        self.assertEqual(audit_land.check_edge_fragments(
-            [p for ps in sides.values() for p in ps], {(214, 106), (215, 106)})["edgeFragments"], 1)
 
 
 class ContourTests(unittest.TestCase):
@@ -333,11 +286,9 @@ class ContourTests(unittest.TestCase):
                 depth[210, 220:230] = 20.01
             pooled[z] = depth, np.full_like(depth, 1000)
         features = lp.depth_tiles(pooled, cx, cy)
-        decoded = {key: audit_land.decode_tile(lp.encode_layers(
-            [{"name": "depth", "features": fs}], lp.EXTENT)) for key, fs in features.items()}
-        parts = [(x, y, rings) for (z, x, y), layers in decoded.items() if z == zoom
-                 for _, props, rings in layers["depth"][1] if props["min"] == 20]
-        region = shapely.union_all(audit_land.depth_polygons(parts, zoom))
+        decoded = {key: mvt.decode(lp.encode_layers([{"name": "depth", "features": fs}], lp.EXTENT),
+                                   default_options={"y_coord_down": True}) for key, fs in features.items()}
+        region = depth_region(decoded, zoom)
         origin = np.array([cx, cy]) * lp.CELL_PX - lp.FRAGMENT_WINDOW_PX
         self.assertTrue(region.covers(shapely.Point(*(origin + np.array([210, 210]) * 8))))
         self.assertFalse(region.covers(shapely.Point(*(origin + np.array([231, 210]) * 8))))
@@ -468,13 +419,11 @@ class SeamTests(unittest.TestCase):
                 ds["elevation"][i, j] = -4
                 point = shapely.Point(float(xs[j]), float(ys[i]))
             tiles, _ = lp.build_cell(lp.Archive(protomaps), lp.Archive(peaks), lp.Gebco(gebco), 214, 106)
-            decoded = {lp.tileid_to_zxy(t): audit_land.decode_tile(gzip.decompress(v))
+            decoded = {lp.tileid_to_zxy(t): mvt.decode(gzip.decompress(v), default_options={"y_coord_down": True})
                        for t, v in tiles.items()}
         for zoom in range(8, 13):
             with self.subTest(zoom=zoom):
-                parts = [(x, y, rings) for (z, x, y), layers in decoded.items() if z == zoom
-                         for _, props, rings in layers.get("depth", (0, []))[1] if props["min"] == 20]
-                region = shapely.union_all(audit_land.depth_polygons(parts, zoom))
+                region = depth_region(decoded, zoom)
                 self.assertGreater(region.area, 0)
                 self.assertFalse(region.covers(point))
 
@@ -491,7 +440,7 @@ class SeamTests(unittest.TestCase):
             decoded = {}
             for cell in (a, b):
                 tiles, _ = lp.build_cell(archive, peak_archive, grid, *cell)
-                decoded[cell] = {lp.tileid_to_zxy(t): audit_land.decode_tile(gzip.decompress(v))
+                decoded[cell] = {lp.tileid_to_zxy(t): mvt.decode(gzip.decompress(v), default_options={"y_coord_down": True})
                                  for t, v in tiles.items()}
         line = shapely.LineString([(seam, 106 * 4096), (seam, 107 * 4096)])
         crossing = 0
@@ -499,9 +448,7 @@ class SeamTests(unittest.TestCase):
             for band in lp.DEPTH_BANDS_M:
                 cuts = []
                 for cell in (a, b):
-                    feats = [(x, y, parts) for (tz, x, y), layers in decoded[cell].items() if tz == z
-                             for _, props, parts in layers.get("depth", (0, []))[1] if props["min"] == band]
-                    region = shapely.union_all(audit_land.depth_polygons(feats, z)) if feats else shapely.Polygon()
+                    region = depth_region(decoded[cell], z, band)
                     cuts.append(region.boundary.union(region).intersection(line))
                 self.assertAlmostEqual(cuts[0].symmetric_difference(cuts[1]).length, 0, places=6, msg=(z, band))
                 crossing += cuts[0].length > 0

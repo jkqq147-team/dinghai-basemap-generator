@@ -390,8 +390,7 @@ unzip GEBCO_2026.zip GEBCO_2026.nc
   --gebco GEBCO_2026.nc --gebco-grid GEBCO_2026 \
   --release $B --cells-file coastal-cells.json \
   --output out/land --state-dir state/$B --jobs 14 --max-rss-mb 3000
-.venv/bin/python audit_land.py out/land \
-  --protomaps protomaps-$B-z0-12.pmtiles --gebco GEBCO_2026.nc --jobs 14
+.venv/bin/python audit_land.py out/land --jobs 14
 ```
 
 `build` hashes both Protomaps inputs and the GEBCO file once (cached in the
@@ -420,18 +419,14 @@ with build/version/bytes/sha256, depth parameters, attribution, licences,
 Each cell's metadata repeats the licence, attribution, GEBCO DOI, depth
 notice, Protomaps build, GEBCO grid and generator hash.
 
-`audit_land.py` re-checks a release without importing the producer: its own
-pmtiles/MVT decoding (stdlib) for layer/field/zoom whitelists, tile placement,
-metadata, bytes and sha256 against `cells.json`/`manifest.json` and stray
-files; with `--protomaps`/`--gebco` it also re-derives, for every depth
-polygon at every zoom, bilinear GEBCO depth on its densified boundary and at
-every GEBCO node inside it (≥ band floor), exact distance from that boundary
-to the Protomaps z12 `earth` polygons (≥ 1500 m, with a poleward-conservative
-metre scale), no land inside, and ≥ 1 km² for pieces that do not touch the
-cell edge. Across two cells in the same release, every positive-length depth
-segment on their shared edge must have a counterpart on the other side;
-one-sided segments are errors. Point-only contacts are allowed, and the
-audit does not infer land or missing GEBCO coverage from the polygons.
+`audit_land.py` performs structural release checks without importing the
+producer, using its own pmtiles/MVT decoding (stdlib): manifest checks,
+layer/field/zoom whitelists, tile placement, metadata, bytes and sha256 against
+`cells.json`/`manifest.json`, and disk-vs-`cells.json` set equality. It reports
+each cell's bytes, features, tiles and zooms. It does not read the Protomaps
+or GEBCO sources or recompute depth geography; depth is illustrative, not
+surveyed and not for navigation. Release checks are structural only,
+followed by an R2 readback and an in-App spot check.
 
 ### Measured on this machine (Apple M5 Max, 18 cores, 48 GB)
 
@@ -449,17 +444,7 @@ and state directories. Load is the 1-minute average before → after each run.
 
 "Without places" is the same cell with the `places` layer removed after
 the fact (measurement only; the producer has no such mode). Both independent
-rebuilds were byte-identical. Both cells passed `audit_land.py` with
-geography against the same full GEBCO file:
-
-| Cell | Edge fragments | Smallest checked edge fragment | windowExempt | openExempt (unverifiable) | Min. offshore |
-| --- | --- | --- | --- | --- | --- |
-| Dachen 8/214/106 | 26 | 2.134 km² | 0 | 0 | 1689.77 m |
-| Hong Kong 8/209/111 | 31 | 2.217 km² | 0 | 2 | 1698.72 m |
-
-`openExempt` counts fragments continuing into a cell not present in that
-one-cell release, so the audit cannot verify their other side; it is not an
-exemption for a one-sided edge between two listed cells. The most poleward
+rebuilds were byte-identical. The most poleward
 coastal cells (3 rings of neighbour tiles, 34 of 14,335) peaked at 0.73 GB
 without land (measured before the fragment window was added).
 

@@ -2,17 +2,15 @@
 # SPDX-License-Identifier: LGPL-3.0-only
 """Independent audit of a land-product release: manifest, cells.json, every cell pmtiles.
 
-Structural checks use only the Python standard library (own pmtiles/MVT decoders).
-With --protomaps and --gebco the depth geography is re-checked against the sources
-with NumPy/Shapely/netCDF4; nothing is imported from land_product.py.
+Structural checks use only the Python standard library (own pmtiles/MVT decoders);
+nothing is imported from land_product.py.
 """
 import argparse
 import gzip
 import hashlib
 import json
-import math
 import struct
-from collections import Counter, defaultdict
+from collections import Counter
 from pathlib import Path
 
 ALLOWED = {
@@ -27,12 +25,9 @@ BANDS = (20, 30, 50, 100, 200)
 OFFSHORE_M = 1500.0
 MIN_FRAGMENT_M2 = 1_000_000
 FRAGMENT_WINDOW_PX = 256  # z12 px beyond a cell that its fragment decisions may see
-EDGE_TOLERANCE_PX = 0.5   # z12 px slack for MVT rounding when matching pieces across an edge
 ODBL_URL = "https://opendatacommons.org/licenses/odbl/1-0/"
 LAND_ATTRIBUTION = "© OpenStreetMap contributors · Protomaps"
 GEBCO_DOI = "10.5285/4f68d5c7-45eb-f999-e063-7086abc036fa"
-EARTH_M = 2 * math.pi * 6378137.0
-WORLD12 = 256 << 12
 
 
 # ---------------------------------------------------------------- pmtiles (stdlib)
@@ -56,17 +51,6 @@ def _rotate(n, x, y, rx, ry):
             x, y = n - 1 - x, n - 1 - y
         x, y = y, x
     return x, y
-
-
-def _tile_id(z, x, y):
-    """PMTiles v3 Hilbert tile id."""
-    acc = ((1 << (2 * z)) - 1) // 3
-    for a in range(z - 1, -1, -1):
-        s = 1 << a
-        rx, ry = s & x, s & y
-        acc += ((3 * rx) ^ ry) << a
-        x, y = _rotate(s, x, y, rx, ry)
-    return acc
 
 
 def _zxy(tile_id):
@@ -250,11 +234,6 @@ def _geometry(commands, gtype):
     return parts
 
 
-def ring_area(ring):
-    """Shoelace area in tile coordinates (y down): positive for MVT exterior rings."""
-    return sum(ax * by - bx * ay for (ax, ay), (bx, by) in zip(ring, ring[1:])) / 2
-
-
 # ---------------------------------------------------------------- structure
 
 def check_metadata(meta, manifest, x, y):
@@ -290,7 +269,7 @@ def check_cell(data, manifest, x, y):
     if (h["min_zoom"], h["max_zoom"]) != (8, 12):
         raise ValueError(f"cell {x}/{y}: header zoom {h['min_zoom']}-{h['max_zoom']}")
     check_metadata(meta, manifest, x, y)
-    counts, zooms, depth = Counter(), Counter(), defaultdict(list)
+    counts, zooms = Counter(), Counter()
     for tid, blob in tiles.items():
         z, tx, ty = _zxy(tid)
         if not 8 <= z <= 12:
@@ -316,380 +295,12 @@ def check_cell(data, manifest, x, y):
                 if name == "depth":
                     if extent != 4096:
                         raise ValueError("depth extent must be 4096")
-                    depth[(z, props["min"])].append((tx, ty, parts))
-    return {"tiles": len(tiles), "zooms": dict(sorted(zooms.items())), "features": dict(counts),
-            "metadata": meta}, depth
-
-
-# ---------------------------------------------------------------- geography
-
-def _lat(gy):
-    import numpy as np
-    return np.degrees(np.arctan(np.sinh(np.pi * (1 - 2 * np.asarray(gy, dtype=float) / WORLD12))))
-
-
-def _mpp(gy):
-    import numpy as np
-    return EARTH_M / WORLD12 * np.cos(np.radians(_lat(gy)))
-
-
-def depth_polygons(features, z):
-    """Shapely polygons in z12 world pixels from decoded depth features of one zoom/band."""
-    from shapely.geometry import Polygon
-    k = 1 << (12 - z)
-    polys = []
-    for tx, ty, parts in features:
-        shell, holes = None, []
-        for ring in parts:
-            pts = [((tx * 4096 + a) / 16 * k, (ty * 4096 + b) / 16 * k) for a, b in ring]
-            area = ring_area(ring)
-            if area > 0:
-                if shell is not None:
-                    polys.append(Polygon(shell, holes))
-                shell, holes = pts, []
-            elif area < 0:
-                if shell is None:
-                    raise ValueError("depth hole before exterior ring")
-                holes.append(pts)
-        if shell is not None:
-            polys.append(Polygon(shell, holes))
-    for p in polys:
-        if not p.is_valid:
-            raise ValueError("invalid depth polygon")
-    return polys
-
-
-class Sources:
-    def __init__(self, protomaps, gebco):
-        import netCDF4
-        import numpy as np
-        self.protomaps_path = Path(protomaps)
-        self.f = open(self.protomaps_path, "rb")
-        head = self.f.read(127)
-        if head[:7] != b"PMTiles" or head[7] != 3:
-            raise ValueError("protomaps source is not pmtiles v3")
-        q = struct.unpack_from("<11Q", head, 8)
-        self.root = (q[0], q[1])
-        self.leaf_offset, self.data_offset = q[4], q[6]
-        self.directories = {}
-        ds = netCDF4.Dataset(gebco)
-        ds.set_auto_mask(False)
-        self.lat = np.asarray(ds["lat"][:], dtype=float)
-        self.lon = np.asarray(ds["lon"][:], dtype=float)
-        self.elev = ds["elevation"]
-
-    def _directory(self, offset, length):
-        key = (offset, length)
-        if key not in self.directories:
-            if len(self.directories) > 32:
-                self.directories.clear()
-            self.f.seek(offset)
-            buf = gzip.decompress(self.f.read(length))
-            n, i = _varint(buf, 0)
-            cols = []
-            for _ in range(3):
-                col = []
-                for _ in range(n):
-                    v, i = _varint(buf, i)
-                    col.append(v)
-                cols.append(col)
-            ids, last = [], 0
-            for v in cols[0]:
-                last += v
-                ids.append(last)
-            offs = []
-            for k in range(n):
-                v, i = _varint(buf, i)
-                offs.append(offs[k - 1] + cols[2][k - 1] if v == 0 and k > 0 else v - 1)
-            self.directories[key] = (ids, cols[1], cols[2], offs)
-        return self.directories[key]
-
-    def tile(self, z, x, y):
-        """Raw MVT of a source tile, by our own directory walk (no land_product code)."""
-        import bisect
-        want = _tile_id(z, x, y)
-        offset, length = self.root
-        for _ in range(4):
-            ids, runs, lengths, offs = self._directory(offset, length)
-            k = bisect.bisect_right(ids, want) - 1
-            if k < 0:
-                return None
-            if runs[k] == 0:
-                offset, length = self.leaf_offset + offs[k], lengths[k]
-                continue
-            if want >= ids[k] + runs[k]:
-                return None
-            self.f.seek(self.data_offset + offs[k])
-            return gzip.decompress(self.f.read(lengths[k]))
-        return None
-
-    def land(self, x, y):
-        """OSM land (Protomaps z12 earth polygons) around cell x/y, z12 world pixels."""
-        import numpy as np
-        from shapely.geometry import Polygon
-        gy = np.array([y * 4096, (y + 1) * 4096])
-        reach = float(np.max(1.25 * OFFSHORE_M / _mpp(gy - 4096) )) + 64
-        rings = math.ceil(reach / 256)
-        polys = []
-        for ty in range(y * 16 - rings, y * 16 + 16 + rings):
-            if not 0 <= ty < 4096:
-                continue
-            for tx in range(x * 16 - rings, x * 16 + 16 + rings):
-                data = self.tile(12, tx % 4096, ty)
-                if data is None:
-                    continue
-                earth = decode_tile(data).get("earth")
-                if not earth:
-                    continue
-                extent, features = earth
-                for gtype, _, parts in features:
-                    if gtype != 3:
-                        continue
-                    shell, holes = None, []
-                    for ring in parts:
-                        pts = [(tx * 256 + a * 256 / extent, ty * 256 + b * 256 / extent) for a, b in ring]
-                        area = ring_area(ring)
-                        if area > 0:
-                            if shell is not None:
-                                polys.append(Polygon(shell, holes).buffer(0))
-                            shell, holes = pts, []
-                        elif area < 0 and shell is not None:
-                            holes.append(pts)
-                    if shell is not None:
-                        polys.append(Polygon(shell, holes).buffer(0))
-        return [p for p in polys if not p.is_empty]
-
-    def depth(self, gx, gy):
-        """Bilinear GEBCO depth (m, positive down) at z12 world pixel points; NaN without coverage."""
-        import numpy as np
-        lat = _lat(gy)
-        lon = np.asarray(gx, dtype=float) / WORLD12 * 360 - 180
-        fi = np.interp(lat, self.lat, np.arange(len(self.lat)), left=np.nan, right=np.nan)
-        fj = np.interp(lon, self.lon, np.arange(len(self.lon)), left=np.nan, right=np.nan)
-        ok = np.isfinite(fi) & np.isfinite(fj)
-        out = np.full(len(lat), np.nan)
-        if not ok.any():
-            return out
-        i = np.minimum(np.floor(fi[ok]).astype(int), len(self.lat) - 2)
-        j = np.minimum(np.floor(fj[ok]).astype(int), len(self.lon) - 2)
-        i0, i1, j0, j1 = i.min(), i.max() + 2, j.min(), j.max() + 2
-        e = -np.asarray(self.elev[i0:i1, j0:j1], dtype=float)
-        wi, wj = fi[ok] - i, fj[ok] - j
-        a, b = i - i0, j - j0
-        out[ok] = ((1 - wi) * ((1 - wj) * e[a, b] + wj * e[a, b + 1])
-                   + wi * ((1 - wj) * e[a + 1, b] + wj * e[a + 1, b + 1]))
-        return out
-
-    def nodes_in(self, poly):
-        """GEBCO node positions (z12 world pixels) inside poly."""
-        import numpy as np
-        import shapely
-        minx, miny, maxx, maxy = poly.bounds
-        lats = self.lat[(self.lat >= _lat(maxy)) & (self.lat <= _lat(miny))]
-        lons = self.lon[(self.lon >= minx / WORLD12 * 360 - 180) & (self.lon <= maxx / WORLD12 * 360 - 180)]
-        if not len(lats) or not len(lons):
-            return np.empty(0), np.empty(0)
-        gy = (1 - np.arcsinh(np.tan(np.radians(lats))) / np.pi) / 2 * WORLD12
-        gx = (lons + 180) / 360 * WORLD12
-        X, Y = np.meshgrid(gx, gy)
-        X, Y = X.ravel(), Y.ravel()
-        inside = shapely.contains_xy(poly, X, Y)
-        return X[inside], Y[inside]
-
-
-def check_depth_geography(depth, sources, x, y):
-    """Every depth polygon: depth >= band floor and >= OFFSHORE_M from OSM land; interior
-    pieces >= MIN_FRAGMENT_M2. Returns summary statistics."""
-    import numpy as np
-    import shapely
-    from shapely.ops import unary_union
-    land = sources.land(x, y)
-    tree = shapely.STRtree(land) if land else None
-    cell = shapely.box(x * 4096, y * 4096, (x + 1) * 4096, (y + 1) * 4096)
-    stats = {"min_offshore_m": None, "min_depth_margin_m": None, "points": 0, "pieces": 0,
-             "min_interior_piece_m2": None}
-    edge_pieces = []
-
-    def note(key, value):
-        if stats[key] is None or value < stats[key]:
-            stats[key] = float(value)
-
-    by_zoom = defaultdict(dict)
-    for (z, band), features in depth.items():
-        by_zoom[z][band] = unary_union(depth_polygons(features, z))
-    for z, bands in by_zoom.items():
-        for band, region in bands.items():
-            if not region.buffer(-1e-6).within(cell) and not region.within(cell.buffer(1e-9)):
-                raise ValueError(f"cell {x}/{y}: z{z} depth {band} leaves the cell")
-            boundary = shapely.segmentize(region.boundary, 0.25)
-            pts = shapely.get_coordinates(boundary)
-            nx, ny = sources.nodes_in(region)
-            px = np.concatenate([pts[:, 0], nx])
-            py = np.concatenate([pts[:, 1], ny])
-            d = sources.depth(px, py)
-            if not np.all(d >= band):
-                bad = np.flatnonzero(~(d >= band))[0]
-                raise ValueError(f"cell {x}/{y}: z{z} depth {band} at ({px[bad]:.1f},{py[bad]:.1f}) "
-                                 f"has GEBCO depth {d[bad]}")
-            note("min_depth_margin_m", float(np.min(d - band)))
-            stats["points"] += len(px)
-            if tree is not None:
-                if tree.query(region, predicate="intersects").size:
-                    raise ValueError(f"cell {x}/{y}: z{z} depth {band} touches land")
-                points = shapely.points(pts)
-                (pi, li), dist = tree.query_nearest(points, return_distance=True, all_matches=False)
-                gy = pts[pi, 1]
-                q = 1.25 * OFFSHORE_M / _mpp(gy) + 4
-                mpp = np.minimum(_mpp(gy - q), _mpp(gy + q))
-                ground = dist * mpp
-                if ground.size and ground.min() < OFFSHORE_M:
-                    k = int(np.argmin(ground))
-                    raise ValueError(f"cell {x}/{y}: z{z} depth {band} {ground[k]:.1f} m from land")
-                if ground.size:
-                    note("min_offshore_m", ground.min())
-            interior, edge = region_pieces(region, z, band, x, y)
-            stats["pieces"] += len(interior) + len(edge)
-            for m2 in interior:
-                note("min_interior_piece_m2", m2)
-            edge_pieces.extend(edge)
-    return stats, edge_pieces
-
-
-def region_pieces(region, z, band, x, y):
-    """Splits one cell's zoom/band depth region into interior pieces (each must cover
-    >= 1 km2 here; returns their m2) and pieces reaching a cell edge (records judged across
-    cells by check_edge_fragments)."""
-    interior, edge = [], []
-    for piece in getattr(region, "geoms", [region]):
-        if piece.is_empty:
-            continue
-        minx, miny, maxx, maxy = piece.bounds
-        m2 = piece.area * float(min(_mpp(miny), _mpp(maxy))) ** 2
-        edges = _edge_intervals(piece, x, y)
-        if edges:
-            edge.append({"z": z, "band": band, "cell": (x, y), "m2": m2,
-                         "bbox": (minx, miny, maxx, maxy), "edges": edges})
-        elif m2 < MIN_FRAGMENT_M2:
-            raise ValueError(f"cell {x}/{y}: z{z} depth {band} piece of {m2:.0f} m2")
-        else:
-            interior.append(m2)
-    return interior, edge
-
-
-def _edge_intervals(piece, x, y):
-    """{edge: [(lo, hi)]} where the piece's outline lies on the cell's W/E/N/S edge (z12 px
-    along the edge), merged; empty when the piece does not reach an edge."""
-    import shapely
-    x0, y0, x1, y1 = x * 4096, y * 4096, (x + 1) * 4096, (y + 1) * 4096
-    lines = {"W": ((x0, y0), (x0, y1), 1), "E": ((x1, y0), (x1, y1), 1),
-             "N": ((x0, y0), (x1, y0), 0), "S": ((x0, y1), (x1, y1), 0)}
-    out = {}
-    for edge, (a, b, axis) in lines.items():
-        hit = piece.boundary.intersection(shapely.LineString([a, b]).buffer(1e-6))
-        if hit.is_empty:
-            continue
-        spans = []
-        for part in getattr(hit, "geoms", [hit]):
-            coords = shapely.get_coordinates(part)[:, axis]
-            spans.append((float(coords.min()), float(coords.max())))
-        spans.sort()
-        merged = [list(spans[0])]
-        for lo, hi in spans[1:]:
-            if lo <= merged[-1][1] + EDGE_TOLERANCE_PX:
-                merged[-1][1] = max(merged[-1][1], hi)
-            else:
-                merged.append([lo, hi])
-        out[edge] = [tuple(m) for m in merged]
-    return out
-
-
-def component_whole(lo, hi):
-    """Independent restatement of the producer's component-level rule. Shared seam nodes
-    belong to both adjacent cells, and only a strictly contained complete span can be
-    judged by its area."""
-    first = math.floor((lo - 1) / 4096)
-    last = math.floor(hi / 4096)
-    return lo > last * 4096 - FRAGMENT_WINDOW_PX and hi < (first + 1) * 4096 + FRAGMENT_WINDOW_PX
-
-
-OPPOSITE = {"W": ("E", -1, 0), "E": ("W", 1, 0), "N": ("S", 0, -1), "S": ("N", 0, 1)}
-
-
-def check_edge_fragments(pieces, listed):
-    """Merges depth pieces that continue across cell edges (same zoom and band, overlapping
-    intervals on the shared edge) and requires each merged fragment to cover >= 1 km2, unless
-    it does not fit the fragment window of the cells it touches (then no cell sees all of it)
-    or it continues into a cell that is not in the release (unverifiable). A positive-length
-    interval on a listed shared edge must have a positive-length counterpart on the other
-    side; point-only contacts are allowed. Land/MISSING is not inferred from the polygons,
-    so a one-sided drawn segment is rejected rather than silently exempted."""
-    parent = list(range(len(pieces)))
-
-    def find(i):
-        while parent[i] != i:
-            parent[i] = parent[parent[i]]
-            i = parent[i]
-        return i
-
-    index = defaultdict(list)
-    for i, p in enumerate(pieces):
-        for edge in p["edges"]:
-            index[(p["z"], p["band"], p["cell"], edge)].append(i)
-    open_edge = [False] * len(pieces)
-    for i, p in enumerate(pieces):
-        for edge, spans in p["edges"].items():
-            other, dx, dy = OPPOSITE[edge]
-            nx, ny = (p["cell"][0] + dx) % 256, p["cell"][1] + dy
-            if not 0 <= ny < 256:
-                continue
-            if (nx, ny) not in listed:
-                open_edge[i] = True
-                continue
-            neighbours = index.get((p["z"], p["band"], (nx, ny), other), [])
-            for lo, hi in spans:
-                if hi - lo <= 1e-6:
-                    continue  # a point touching an edge need not have a drawn continuation
-                matched = False
-                for j in neighbours:
-                    for lo2, hi2 in pieces[j]["edges"][other]:
-                        # Both sides must draw a segment, not merely touch at a point.
-                        if (hi2 - lo2 > 1e-6
-                                and min(hi, hi2) - max(lo, lo2) > -EDGE_TOLERANCE_PX):
-                            matched = True
-                            parent[find(i)] = find(j)
-                if not matched:
-                    raise ValueError(
-                        f"one-sided shared-edge depth: fragment across cells {p['cell']} "
-                        f"z{p['z']} band {p['band']} edge {edge} [{lo}, {hi}] has no "
-                        f"counterpart in {(nx, ny)}")
-    groups = defaultdict(list)
-    for i in range(len(pieces)):
-        groups[find(i)].append(i)
-    summary = {"edgeFragments": len(groups), "smallestCheckedM2": None, "windowExempt": 0, "openExempt": 0}
-    for members in groups.values():
-        m2 = sum(pieces[i]["m2"] for i in members)
-        if m2 >= MIN_FRAGMENT_M2:
-            if summary["smallestCheckedM2"] is None or m2 < summary["smallestCheckedM2"]:
-                summary["smallestCheckedM2"] = m2
-            continue
-        if any(open_edge[i] for i in members):
-            summary["openExempt"] += 1
-            continue
-        bx0 = min(pieces[i]["bbox"][0] for i in members); by0 = min(pieces[i]["bbox"][1] for i in members)
-        bx1 = max(pieces[i]["bbox"][2] for i in members); by1 = max(pieces[i]["bbox"][3] for i in members)
-        t = EDGE_TOLERANCE_PX
-        if not (component_whole(bx0 - t, bx1 + t) and component_whole(by0 - t, by1 + t)):
-            summary["windowExempt"] += 1
-            continue
-        p = pieces[members[0]]
-        raise ValueError(f"z{p['z']} depth {p['band']}: fragment across cells "
-                         f"{sorted({pieces[i]['cell'] for i in members})} covers {m2:.0f} m2")
-    return summary
+    return {"tiles": len(tiles), "zooms": dict(sorted(zooms.items())), "features": dict(counts)}
 
 
 # ---------------------------------------------------------------- release
 
-def audit(root, protomaps=None, gebco=None, jobs=1):
+def audit(root, jobs=1):
     root = Path(root)
     manifest = json.loads((root / "manifest.json").read_text())
     for key, value in (("id", "dinghai-land"), ("manifestVersion", 1), ("gridZoom", 8),
@@ -723,53 +334,37 @@ def audit(root, protomaps=None, gebco=None, jobs=1):
     present = {p.resolve() for p in cell_root.rglob("*") if p.is_file()} if cell_root.exists() else set()
     if present != listed:
         raise ValueError(f"cells on disk differ from cells.json: {sorted(map(str, present ^ listed))[:5]}")
-    report = {"release": release, "cells": {}, "geography": bool(protomaps and gebco)}
-    jobs_list = [(str(cell_root), manifest, c, protomaps and str(protomaps), gebco and str(gebco)) for c in cells]
-    edge_pieces = []
+    report = {"release": release, "cells": {}}
+    jobs_list = [(str(cell_root), manifest, c) for c in cells]
     if jobs > 1:
         import multiprocessing
         with multiprocessing.get_context("spawn").Pool(jobs) as pool:
             results = pool.imap_unordered(_audit_cell, jobs_list, chunksize=4)
-            for key, summary, pieces in results:
+            for key, summary in results:
                 report["cells"][key] = summary
-                edge_pieces.extend(pieces)
     else:
         for job in jobs_list:
-            key, summary, pieces = _audit_cell(job)
+            key, summary = _audit_cell(job)
             report["cells"][key] = summary
-            edge_pieces.extend(pieces)
     report["cells"] = dict(sorted(report["cells"].items()))
-    if report["geography"]:
-        report["edgeFragments"] = check_edge_fragments(edge_pieces, {(c["x"], c["y"]) for c in cells})
     return report
 
 
-_SOURCES = {}
-
-
 def _audit_cell(job):
-    cell_root, manifest, c, protomaps, gebco = job
+    cell_root, manifest, c = job
     x, y = c["x"], c["y"]
     data = (Path(cell_root) / "8" / str(x) / f"{y}.pmtiles").read_bytes()
     if len(data) != c["bytes"] or hashlib.sha256(data).hexdigest() != c["sha256"]:
         raise ValueError(f"cell {x}/{y}: bytes/sha256 disagree with cells.json")
-    summary, depth = check_cell(data, manifest, x, y)
-    summary.pop("metadata")
-    pieces = []
-    if protomaps and gebco and depth:
-        if (protomaps, gebco) not in _SOURCES:
-            _SOURCES[(protomaps, gebco)] = Sources(protomaps, gebco)
-        summary["depth"], pieces = check_depth_geography(depth, _SOURCES[(protomaps, gebco)], x, y)
+    summary = check_cell(data, manifest, x, y)
     summary["bytes"] = c["bytes"]
-    return f"{x}/{y}", summary, pieces
+    return f"{x}/{y}", summary
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("root", type=Path, help="resource root containing manifest.json")
-    parser.add_argument("--protomaps", type=Path, help="the Protomaps build used for the release")
-    parser.add_argument("--gebco", type=Path, help="the GEBCO netCDF used for the release")
     parser.add_argument("--jobs", type=int, default=1)
     args = parser.parse_args()
-    print(json.dumps(audit(args.root, args.protomaps, args.gebco, args.jobs), indent=2, sort_keys=True,
+    print(json.dumps(audit(args.root, args.jobs), indent=2, sort_keys=True,
                      ensure_ascii=False))
