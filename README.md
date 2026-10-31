@@ -361,6 +361,26 @@ to both adjacent cells (`FragmentPropertyTests`).
 Protomaps' own advice is to copy a build rather than hotlink it; each input
 above is read from the build once per release, never per cell.
 
+### Exact rebuild versus a new release
+
+The steps below derive the cell list from whatever Seamap build
+`tiles.json` names *today*, so they produce a **new release from current
+sources**. Seamap has since moved past `2026-09-28`, and Protomaps keeps
+daily builds only for a limited time; neither upstream input of
+release `20261025` is guaranteed to stay downloadable.
+
+An **exact rebuild of release `20261025`** must reuse its recorded inputs
+instead of re-deriving them: `protomaps-20261025-z0-12.pmtiles`
+(SHA-256 `c47187176824380f6b5a679d807a115ac91f5c63ee300b4280615a9622a9389d`),
+`peaks-20261025.pmtiles`
+(`d3ada5a3c5183e656e25a56db702fd5ac144df53caec9f4844292d0f0b60b21f`),
+`GEBCO_2026.nc`
+(`71ceeb56a4b917a3f2d9fe3c6da8e7c5c5e6d8185b373eca6bac9a4d61cb3223`) and the
+2026-09-28 `coastal-cells.json`
+(`6ad3a4871165e63b8a2395270ca8c9235af64221e260e914769b33b856728bee`,
+14,335 cells). Skip the `cells` and `peaks` steps and pass those files to
+`build`. The maintainer keeps these inputs offline; they are not published.
+
 ### Rebuild in an empty directory
 
 Same interpreter as above (CPython 3.12.7, macOS arm64 wheels in
