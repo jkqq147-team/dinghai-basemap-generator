@@ -387,11 +387,15 @@ Same interpreter as above (CPython 3.12.7, macOS arm64 wheels in
 `requirements.txt`). Additionally needed: go-pmtiles (verified with 1.31.2)
 and about 60 GB free disk (below).
 
+For a new release, replace `YYYYMMDD` below with the latest available date
+from [Protomaps' build list](https://build-metadata.protomaps.dev/builds.json),
+using the same `B` for the base tiles and peaks.
+
 ```sh
 python3.12 -m venv .venv
 .venv/bin/python -m pip install --require-hashes -r requirements.txt
 .venv/bin/python -m unittest discover -s tests -v
-B=20261025
+B=YYYYMMDD
 pmtiles extract https://build.protomaps.com/$B.pmtiles protomaps-$B-z0-12.pmtiles --maxzoom=12
 curl --fail --location -o seamap-tiles.json https://tiles.openwaters.io/seamap/tiles.json
 SEAMAP_DATE=$(python3 -c 'import json,re; d=json.load(open("seamap-tiles.json")); print(re.search(r"Seamap ([0-9-]+)", d["description"]).group(1))')
