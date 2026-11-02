@@ -8,3 +8,4 @@ __pycache__/
 .env*
 .dev.vars*
 .DS_Store
+/planetiler/target/

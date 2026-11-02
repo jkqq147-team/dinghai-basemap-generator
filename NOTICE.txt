@@ -76,3 +76,21 @@ The test fixtures tests/fixtures/protomaps-dachen*.pmtiles and
 tests/fixtures/gebco-dachen.nc are small extracts of the same sources under
 the same terms. land_product.py, audit_land.py, tests/test_land.py and
 tests/fixtures/make_land_fixtures.py are offered under LGPL-3.0-only.
+
+----------------------------------------------------------------------
+DingHai combined Seamap cells / seamap-cell-1
+
+The seamark, land, water, wetland and sea_area layers are derived directly
+from OpenStreetMap and OSM Data's land polygons: Copyright OpenStreetMap
+contributors, Open Database License 1.0 (Licenses/ODbL-1.0.txt,
+https://www.openstreetmap.org/copyright). No third-party compiled Seamap
+archive, feature or attribution is included. Planetiler is an Apache-2.0
+build dependency, not incorporated into the data; its pinned version and
+the custom LGPL-3.0-only schema are in planetiler/.
+
+seamap_product.py combines those layers with the ODbL Protomaps and GEBCO
+land-product-1 layers whose notices appear above. Source URLs, dates,
+bytes and SHA-256 are recorded per release. These are general map data,
+not an ENC or navigation chart; the illustrative-depth warning remains
+unchanged. compare_pilot.py is verification-only: it makes bounded memory
+Range reads and emits aggregate counts, never producer input or features.

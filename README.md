@@ -1,6 +1,6 @@
 # DingHai basemap generators
 
-This repository holds two development-side producers. Neither runs in the App.
+This repository holds three development-side producers. None runs in the App.
 
 - **GSHHG marine background** (`gshhg_product.py`, `audit_product.py`) —
   python-product-2, described first below.
@@ -8,6 +8,9 @@ This repository holds two development-side producers. Neither runs in the App.
   one pmtiles per Seamap z8 cell with simplified OpenStreetMap land and
   illustrative offshore depth, described in
   [Seamap land cells](#seamap-land-cells--land-product-1).
+- **Combined OSM Seamap cells** (`planetiler/`, `seamap_product.py`,
+  `audit_seamap.py`) — seamap-cell-1: direct OSM marine layers merged with
+  land-product-1 into one z8-cell PMTiles, described last below.
 
 ## GSHHG marine background — python-product-2
 
@@ -506,3 +509,144 @@ The test fixtures under `tests/fixtures/` (`protomaps-dachen*.pmtiles`,
 `gebco-dachen.nc`) are small extracts of the same sources under the same
 terms. `land_product.py`, `audit_land.py` and their tests are offered under
 LGPL-3.0-only like the rest of this repository.
+
+## Combined OSM Seamap cells — seamap-cell-1
+
+`planetiler/` and `seamap_product.py` extend the per-cell product with layers
+compiled directly from OpenStreetMap. They do not read, import or redistribute
+a third-party compiled Seamap archive, and do not use its attribution.
+
+```text
+OSM PBF ───────────────┐
+                       ├─ Planetiler 0.10.2, z8–14 ─ one intermediate PMTiles
+OSM land polygons ─────┘      seamark / land / water / wetland / sea_area
+                                      │
+land-product-1 PMTiles ───────────────┤ raw MVT layer messages, no reprojection
+  landuse / roads / peaks / places / depth (z8–12)
+                                      ▼
+                  one PMTiles per selected z8 cell + cells.json SHA-256/bytes
+```
+
+Planetiler is pinned in `planetiler/pom.xml` (Apache-2.0). The custom schema
+and Python splitter/merger are LGPL-3.0-only. Java 21 and Maven are the only
+additional build tools; `osmium fileinfo` records the PBF replication time.
+
+### Layers and App-facing fields
+
+| Layer | OSM source | App contract |
+| --- | --- | --- |
+| `seamark` | every `seamark:type`; piers, breakwaters, groynes, quays, wharves and pontoons from `man_made` | original `seamark:*`, names and `function`; `osm_id`, tile `zoom`; normalized `type`, `category`, `shape`, `color`, `color_pattern`, `topmark_shape`, `topmark_color`, `light_color`, `family` |
+| `land` | `land-polygons-complete-4326` | polygon fill and coastline stroke from z8 |
+| `water` | `natural=water`, `waterway=riverbank`, reservoir/basin polygons | `name`, `water` |
+| `wetland` | `natural=wetland` + mangrove/tidalflat/saltmarsh | `type=wetland`, `category`, `name`, `surface` |
+| `sea_area` | `place=sea`, `natural=bay` | `category`, Chinese/default names; polygon labels use point-on-surface |
+
+The existing five land-product layers retain their original z8–12 MVT
+messages and metadata. Combined files are z8–14. `light` is not separate:
+lights are seamarks with `light_color`, which the App style and query adapter
+consume. `waterway` is not emitted because the App does not read it. Raw
+multi-sector light tags remain available, but this lane adds no sector
+renderer or new App attributes.
+
+Complete, not split, OSM land polygons are deliberate. The official split
+product has overlapping processing chunks; since the App strokes every land
+polygon edge, artificial chunk edges could become false inland coasts.
+Planetiler clips complete polygons to tile buffers instead. This is a
+rendering correctness choice, not a reduced-resolution coastline.
+
+### Build
+
+Download fixed inputs and record actual URL, replication/data date, byte
+count and SHA-256. The current global PBF is about 95.6 GB; use a dated planet
+URL rather than relying on mutable `latest` identity. Land polygons are ODbL
+OSM coastline processing from
+`https://osmdata.openstreetmap.de/data/land-polygons.html`.
+
+```sh
+brew install openjdk@21 maven osmium-tool
+export JAVA_HOME=$(brew --prefix openjdk@21)
+export PATH="$JAVA_HOME/bin:$PATH"
+mvn -q -f planetiler/pom.xml package
+unzip land-polygons-complete-4326.zip -d land-polygons-complete
+java -Xmx24g -jar planetiler/target/dinghai-seamap-compiler-1.0.0.jar \
+  --osm=planet-YYMMDD.osm.pbf \
+  --osm_url=https://planet.openstreetmap.org/pbf/planet-YYMMDD.osm.pbf \
+  --land=land-polygons-complete/land-polygons-complete-4326/land_polygons.shp \
+  --output=seamap-osm.pmtiles --minzoom=8 --maxzoom=14 --threads=12 \
+  --tmpdir=/tmp/dinghai-seamap-planetiler
+```
+
+Use a different `--tmpdir` for every concurrent compiler; Planetiler deletes
+and recreates that directory at startup.
+For a pilot, pre-clip **both** inputs and omit `--bounds`: use
+`osmium extract --strategy=smart -b …` for OSM and
+`land_subset.py --bbox NAME=west,south,east,north` for the land Shapefile
+(pure-Python `pyshp`, pilot only). Planetiler 0.10.2's GeoTools Shapefile
+bbox filter returned zero features for these OSM WGS84 polygons (reproduced
+with extracted files and explicit longitude-first CRS); clipping first avoids
+that upstream filter.
+The compiler forces exact global Web-Mercator bounds and rejects regional
+`--bounds`, since inferred regional bounds would reactivate that filter.
+Use `seamap_slice.py --input regional.pmtiles --output cell.pmtiles --cell X/Y`
+before combining disjoint regional archives. A selected continent polygon can
+touch tiles worldwide; slicing is the authoritative z8-cell boundary, not
+Planetiler's `--polygon` (which did not reduce output tiles in the pilot).
+The global build needs no clipping. The provenance JSON is explicit (`osm`
+may be a list when a pilot combines disjoint compilations):
+```json
+{
+  "osm": {"url": "https://…/planet-YYMMDD.osm.pbf", "date": "YYYY-MM-DD…", "bytes": 0, "sha256": "…"},
+  "landPolygons": {"url": "https://osmdata.openstreetmap.de/download/land-polygons-complete-4326.zip", "date": "YYYY-MM-DD…", "bytes": 0, "sha256": "…"}
+}
+```
+
+Merge against a completed land-product-1 resource root. `--cell X/Y` may be
+repeated; `--cells-file` takes the existing coastal-cell JSON; `--all-cells`
+writes all 65,536 z8 cells. Unlike land-product-1, an empty ocean cell still
+gets a small PMTiles and manifest entry so coverage and size are unambiguous.
+Builds resume by input/generator identity and write the manifest only after
+every selected cell succeeds.
+
+```sh
+python3.12 seamap_product.py \
+  --osm-pmtiles seamap-osm.pmtiles --provenance provenance.json \
+  --land-release out/land --release YYYYMMDD \
+  --all-cells --output out/seamap --state-dir state/seamap --jobs 4
+python3.12 audit_seamap.py out/seamap
+```
+
+`cells.json` entries include actual `bytes`/`sha256` and per-layer feature/byte
+statistics; worker `seconds` stays in resume state and stdout so the release
+is deterministic. `mvtBytes` is uncompressed MVT Layer
+message bytes; `gzipBytes` compresses each layer separately for diagnosis and
+is **not** an additive physical PMTiles layout. Only top-level `bytes` and
+manifest `totalBytes` are download sizes.
+
+`audit_seamap.py` independently checks hashes, inventory, tile/cell/zoom
+placement, layers and metadata. It does not establish complete or
+navigation-grade geography. No scheduler, CI rebuild, R2 upload or App change
+is included; monthly or quarterly manual regeneration is sufficient.
+
+### App integration boundary
+
+This lane produces **one** `dinghai-seamap` schema-2 file per cell. The current
+App expects a third-party archive plus a separate `dinghai-land` schema-1
+file, so it cannot open this new manifest unchanged. A later App lane must
+point `seamap`, land/depth and query sources at the same per-cell PMTiles and
+read the schema-2 manifest. Existing style field names otherwise remain the
+contract. This is not a second compatibility archive or dual-write release.
+
+### Aggregate-only third-party comparison
+
+`compare_pilot.py` is not a producer. For explicitly selected pilot cells it
+uses public TileJSON to locate the current archive, reads only z14 tile ranges
+needed for those cells into memory, coalesces ranges (64 KiB maximum gap,
+4 MiB maximum request), and prints only aggregate counts by category/type and
+request-byte totals. It never writes a remote response, tile, feature,
+geometry or attribute to disk and is never an input to either generator.
+Different OSM dates and feature normalization mean counts need not be equal.
+
+```sh
+python3.12 compare_pilot.py --release-root out/seamap --release YYYYMMDD-pilot \
+  --cell 209/111 --cell 214/106 --cell 138/100 --cell 225/113 --cell 203/99
+```
