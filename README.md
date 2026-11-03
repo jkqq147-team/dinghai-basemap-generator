@@ -1,256 +1,86 @@
-# DingHai basemap generators
+# DingHai basemap generator
 
-This repository holds three development-side producers. None runs in the App.
+This repository holds DingHai's development-side offline basemap producer,
+**seamap-cell-2**. It does not run in the App. One Planetiler compile of one
+OpenStreetMap snapshot yields, as standard PMTiles (one gzip per tile, no
+DingHai-specific format):
 
-- **GSHHG marine background** (`gshhg_product.py`, `audit_product.py`) —
-  python-product-2, described first below.
-- **Seamap land cells** (`land_product.py`, `audit_land.py`) — land-product-1:
-  one pmtiles per Seamap z8 cell with simplified OpenStreetMap land and
-  illustrative offshore depth, described in
-  [Seamap land cells](#seamap-land-cells--land-product-1).
-- **Combined OSM Seamap cells** (`planetiler/`, `seamap_product.py`,
-  `audit_seamap.py`) — seamap-cell-1: direct OSM marine layers merged with
-  land-product-1 into one z8-cell PMTiles, described last below.
-
-## GSHHG marine background — python-product-2
-
-This is the DingHai marine-background producer. It runs on a development computer,
-not in the App. It extends Marine Imagery's existing Python/Shapely projection,
-world splitting and UInt16 encoding with official binary records, five LODs
-and a disk-backed fragment spool. It does not import any
-other Marine Imagery module. No App, map renderer, accounts, chart converter,
-Clipper/C++ runtime or general GIS framework is included.
+- a **global overview**, z0–7, one file: land and inland water, the sea being
+  everything else;
+- one **cell** file per z8 tile (the App's `SeamapCell`, `gridZoom = 8`), z8–14,
+  for all 65,536 cells: seamarks, land, water, wetland, sea areas, land use,
+  roads, peaks, places and illustrative GEBCO depth.
 
 ```text
-official gshhg-bin-2.3.7.zip (verified whole body)
-  → select exactly five gshhs_{c,l,i,h,f}.b members; verify ZIP CRC and bytes
-  → one binary record → longitude continuity → polar/latitude/world clipping
-      coast: L1–4, every L5 → land L1, every L6 excluded (ice-front)
-      fill: all retained hierarchy levels, polar closure only for fill
-      stroke: L1 and L5 original source paths only; no inland L2–4 outlines
-  → row then tile clipping → 65535-unit UInt16 coordinates
-  → disk fragments → ordered one-group aggregation → schema 2 → quick_check
-  → atomically replace DingHaiCoastlines.sqlite
+planet-YYMMDD.osm.pbf ──────────────────────────────────────────┐
+land_polygons.shp ─┬────────────────────────────────────────────┤ Planetiler 0.10.2
+                   └ depth_product.py index → land-index.sqlite │ planetiler/ SeamapCompiler
+GEBCO_2026.nc ─────── depth_product.py build ─── depth/x*.shp ──┘ → seamap.pmtiles, z0–14
+                        (offshore distance to the same land polygons)
+seamap.pmtiles ─ seamap_product.py ─┬─ releases/<release>/overview.pmtiles        z0–7
+                                    ├─ releases/<release>/cells/8/{x}/{y}.pmtiles  z8–14 ×65,536
+                                    └─ releases/<release>/cells.json, manifest.json
 ```
 
-The adopted marine-background scope is exactly
-`family='coast' AND (kind=0 OR level=1)`: all five resolutions of sea/land/lake
-fills and sea coasts/island outlines remain. Rivers, national/administrative
-borders and inland water outlines are not produced or downloaded. There is no
-full-product mode, legacy fallback, dual write or App-side hiding switch.
-The official input ZIP still contains WDB files, but the producer never
-extracts or converts them.
+No Protomaps build, no per-cell merge of a second product and no third-party
+Seamap archive is read, redistributed or credited. Tiles are copied from the
+compiled archive into the overview and cells, never re-encoded. The former
+GSHHG marine background (`gshhg_product.py`, `DingHaiCoastlines.sqlite`) and
+land-product-1 (`land_product.py`) are gone; the overview replaces the first,
+the cells' land layers the second.
 
-The geometry operations are Python/GEOS, not the App's integer Clipper engine.
-The retained geometry pipeline and quantization are unchanged from
-python-product-1; release verification compares every retained SQL field and
-geometry byte against that published Python product. Whole-database hashes
-are expected to change with scope and provenance metadata. Neither this
-comparison nor the fixtures promise exhaustive worldwide geography or
-equivalence to the former App-produced database.
+| File | Role |
+| --- | --- |
+| `planetiler/` | `SeamapCompiler.java`, the only layer rules; Planetiler pinned in `pom.xml` |
+| `depth_product.py` | land-polygon index and GEBCO depth bands, an input of the compile |
+| `seamap_product.py` | cuts the compiled archive into overview and cells; `cells.json`, `manifest.json` |
+| `audit_seamap.py` | stdlib-only structural audit of a release |
+| `land_subset.py` | pilots only: selects whole land polygons around pilot boxes |
 
-### Rebuild in an empty directory
+## Layers and App-facing fields
 
-Unpack the corresponding-source ZIP into an empty directory. The source archive
-contains this directory only; no private repository checkout is required.
-The verified environment is CPython **3.12.7**, Shapely **2.0.6**, NumPy **2.5.3**,
-GEOS **3.11.4** (macOS arm64 wheel), system SQLite **3.45.3**. These are desktop
-measurements, not iPhone costs. Install a matching Python interpreter first.
-No GDAL, GMT, compiler, App SDK, parallel pool or service is needed.
+The overview (z0–7) has two layers without fields. They carry what the GSHHG
+background drew when zoomed out — sea, land, lake fills and the sea coast
+including island outlines — and nothing more: no depth bands and no sea-area
+names, which the App shows only from z8 in cells.
 
-```sh
-python3.12 -m venv .venv
-.venv/bin/python -m pip install -r requirements.txt
-.venv/bin/python -m unittest discover -s tests -v
-curl --fail --location \
-  https://www.soest.hawaii.edu/pwessel/gshhg/gshhg-bin-2.3.7.zip \
-  --output gshhg-bin-2.3.7.zip
-.venv/bin/python gshhg_product.py \
-  --official-archive gshhg-bin-2.3.7.zip --source-version 2.3.7 \
-  --output DingHaiCoastlines.sqlite
-.venv/bin/python audit_product.py DingHaiCoastlines.sqlite
-```
-
-The CLI verifies the official archive before conversion:
-
-- URL: `https://www.soest.hawaii.edu/pwessel/gshhg/gshhg-bin-2.3.7.zip`
-- Whole body: **118617033 bytes**
-- SHA-256: `28600e8f7a08645aab43079326df6504212ec5ccb2b4bcf3b5f4f12ed60e82bc`
-- Selected members: `gshhs_{c,l,i,h,f}.b`, exactly once each, flat paths only.
-
-ZIP member CRC/bytes and each member's actual SHA-256, record/level counts are
-written to database metadata, along with the archive hash, source version and
-generator file hash. No source-master revision is claimed as binary identity.
-The official archive is the editable data input; obtain the fixed body above,
-not a source-checkout or Shapefile package. Dependencies are not vendored:
-Shapely and NumPy distributions and source are available from their versioned
-PyPI projects; no dependency implementation is incorporated in the SQLite.
-
-For the included small **official-source** fixture conversion:
-
-```sh
-.venv/bin/python gshhg_product.py --source-version 2.3.7-fixture \
-  --input coast:c:tests/fixtures/gshhs_c.b \
-  --input coast:f:tests/fixtures/gshhs_f-controls.b \
-  --output fixture.sqlite
-```
-
-Explicit-file mode records its scope as `explicit-file-inputs`, never as the
-official five-member source selection. Release metadata uses
-`source_scope=official-coast-5`, `product_scope=marine-background` and the
-retained-row predicate above, never the old `official-complete-15` label.
-The fixture set contains the unchanged whole c coast member and two f polar
-records (L5 ice-front and L6 grounding). Routing c into other LODs in tests
-exercises chunk/LOD behavior only; it is not full-global equivalence evidence.
-
-### Output contract and release
-
-| Display zoom | Resolution | Chunk zoom | Family |
-| --- | --- | --- | --- |
-| 0–3 | c | 2 | coast |
-| 4–5 | l | 3 | coast |
-| 6–7 | i | 4 | coast |
-| 8–10 | h | 5 | coast |
-| 11+ (stored maximum 30) | f | 6 | coast |
-
-Schema 2 uses `metadata`, `lods`, `features`; the latter keys a blob by
-resolution/tile/family/level/kind. Kind 0 is polygon rings; kind 1 is source
-polylines, present only at level 1. Encoding is
-`dinghai-quantized-web-mercator-v1`, UInt16 maximum 65535,
-with little-endian UInt32 counts. Higher coast hierarchy levels overlay lower
-ones; odd levels are land and even levels water. The `family` field remains
-part of schema 2 and is always `coast`. The spool is dropped from the finished
-database.
-
-Release packaging is a ZIP containing only `DingHaiCoastlines.sqlite`, DEFLATE
-level 9, fixed member timestamp `1980-01-01 00:00:00`, regular-file mode 0644.
-Record actual DB/ZIP bytes and SHA-256, compression time, then physically unpack
-and rehash before release. The corresponding-source ZIP and NOTICE/license
-texts must be offered alongside the data. `audit_product.py` independently
-uses only Python stdlib to decode every stored blob and check integrity,
-routing, marine-only scope, five official source members, counts, polar
-strokes and necessary full-resolution land/sea controls.
-It is not a proof of exhaustive worldwide geography or App display behavior.
-
-**Payload/manifest hosting decision: Cloudflare only.** The resource root is
-`https://resources.dinghai.app/gshhg/`, with the file entry point
-`https://resources.dinghai.app/gshhg/manifest.json`. That manifest declares
-datasetVersion `gshhg-2.3.7-python-product-2` with payload
-`https://resources.dinghai.app/gshhg/releases/gshhg-2.3.7-python-product-2/gshhg-2.3.7-python-product-2.zip`
-(82470346 bytes, SHA-256
-`0389dd824f875179048d8aa1165a8d194d2407e875360a87fe272a376a7000b3`).
-The corresponding-source host is one **independent minimal public GitHub
-repository**, `https://github.com/jkqq147-team/dinghai-basemap-generator`. It contains only
-this standalone generator, audit, necessary tests/fixtures, rebuild instructions,
-dependency lock and licenses, never the DingHai App or all of Marine Imagery.
-For each dataset version, use the same fixed tag/release and attach the matching
-minimal source ZIP. No basemap payload ZIP is uploaded to GitHub, and there is
-no CF source fallback or second payload source for this new version.
-
-The fixed tag `gshhg-2.3.7-python-product-2` points at commit
-`51e1c2fd33c139d4b6f3972d0e71b6d4ef68752b`. Its published GitHub release
-carries `gshhg-product-2.3.7-python-product-2-source.zip` (2680446 bytes,
-SHA-256 `159d67ddceb98133706d651a40968ff5d6a893d6c117b048c6adf4ee903d306f`).
-The CF manifest's `correspondingSource` names that release asset with the same
-bytes and SHA-256; its `noticeURL` and `licenseURLs` point at `NOTICE.txt` and
-`Licenses/` at the fixed tag:
-
-```text
-dataset/tag/release: gshhg-2.3.7-python-product-2
-  CF payload/manifest → gshhg-2.3.7-python-product-2.zip / manifest.json
-  GitHub release      → gshhg-product-2.3.7-python-product-2-source.zip
-  GitHub fixed tag    → NOTICE.txt / Licenses/
-```
-
-The README.md and NOTICE.txt inside that tag and source ZIP were written before
-publication and still describe these links as planned and unpublished. They are
-left unchanged so the published tag and ZIP stay fixed; this text on `main`
-describes the published state.
-
-Corresponding source and licenses must remain accessible for the exact data
-version, without relying on a resource HTML page or a source/license entry
-on the offline chart page. The DingHai App reads this manifest and accepts only
-the marine-background scope. Since App commit `b5d94ab`, the GSHHG section of
-its existing legal notices links the installed basemap's manifest
-`correspondingSource` URL, labelled with its dataset version; the offline chart
-page no longer carries that link and retains basemap download management.
-This repository makes no App change.
-No App support/privacy page or broader privacy/legal work is part of this release.
-Do not overwrite python-product-1 artifacts; do not delete the existing v1 CF
-source. This tool neither reads credentials nor creates repositories, pushes,
-uploads, deploys or creates services. Do not publish the private repository or
-unrelated tools. Anonymous resource delivery is not a promise that a host
-cannot see request metadata.
-
-A fixed product can remain static. Regenerate only for an adopted official-data
-version, a conversion fix or a reader-format change; keep download links and
-corresponding source/licensing available. There is no scheduled rebuild/CI
-framework here and no promise of permanent zero maintenance.
-
-### License and corresponding source
-
-GSHHG is by **Paul Wessel and Walter H. F. Smith**, distributed under
-**LGPL-3.0-or-later** (official `Licenses/GSHHG-NOTICE.txt`). This derived resource
-uses version 3. This standalone generation code and modifications are offered
-under **LGPL-3.0-only**; the same grant applies to the audit and tests. GNU LGPLv3
-incorporates GPLv3; both full texts are included. There is no Clipper dependency
-or Clipper code in this implementation.
-
-GPLv3 §1 defines Corresponding Source as the preferred form for modification,
-including scripts needed to generate the covered work; §6(d) requires equivalent
-source access when conveying object code over a network. LGPLv3 incorporates
-those terms and adds its permissions. Conservatively, this distribution offers
-the generator, audit, tests, fixed build/input instructions and license notices
-alongside the transformed data. This is a **minimal generator/data source
-boundary**, not a claim that the private App is open source or that this notice
-is an adjudication of every legal classification. Publication must retain that
-boundary and source availability.
-
-GSHHG reference: Wessel, P., and W. H. F. Smith (1996), *A global,
-self-consistent, hierarchical, high-resolution shoreline database*,
-J. Geophys. Res., 101(B4), 8741–8743. This is a general geographic basemap,
-**not an ENC or a navigation chart**, provided without warranty or support.
-
-## Seamap land cells — land-product-1
-
-`land_product.py` cuts one pmtiles per Seamap z8 cell (the App's
-`SeamapCell`, `gridZoom = 8`: XYZ tile x/y at zoom 8), z8–12, from local
-copies of one Protomaps build and the GEBCO_2026 grid. It runs on a
-development computer; it reads local files only and never uploads.
-
-```text
-local z0-12 extract of build B ─┬─ z8-12 tiles of the cell ── landuse / roads / places
-                                │                              (+ z12 earth: depth land mask)
-local z13 peaks of build B ─────┴─ z13 pois kind=peak ─────── lifted into z12 peaks
-GEBCO_2026.nc ── bilinear depth on z12 world-pixel nodes ──── depth bands
-          │
-          └→ releases/<release>/cells/8/{x}/{y}.pmtiles
-             releases/<release>/cells.json, manifest.json
-```
-
-### Layers
-
-| Layer | Source | Contents |
+| Overview layer | Source | App use |
 | --- | --- | --- |
-| `landuse` | Protomaps `landuse` | `class` wood/park/farmland/urban/industrial/beach, merged per class per tile and clipped to that tile's Protomaps `earth` |
-| `roads` | Protomaps `roads` | `class` highway; major (trunk/primary); secondary (secondary/tertiary, z11+) |
-| `peaks` | Protomaps `pois` kind=peak | `ele` (integer m); z12 holds the build's z12 peaks plus those of the peaks file's zooms (z13 for releases), deduplicated; peaks without a numeric elevation are dropped |
-| `places` | Protomaps `earth` kind=island points, `places` kind=locality with kind_detail town/village/locality | `kind`, `name` = `name:zh-Hans`, else `name:zh`, else `name` |
-| `depth` | GEBCO_2026 | `min` = band floor (20/30/50/100/200 m), cumulative polygons |
+| `land` | OSM land polygons, simplified per zoom (0.25 px) | land fill; its own edges are the coastline and island outlines (tile-clipped edges fall in the tile buffer, as for cells) |
+| `water` | the cell `water` rule without river polygons (`waterway=riverbank`, `water=river/canal/stream/ditch/drain/oxbow`), no fields, under 2 px dropped per zoom | lake and reservoir fill, drawn in the sea colour and not stroked, like GSHHG's even levels |
 
-Not produced: `earth`, `water`, `boundaries`, `buildings`, `transit`, other
-`pois`, minor roads, paths, rail, ferries. `earth` is left out because Seamap
-already draws land, and both uses of a land mask are applied here at
-generation time (landuse is clipped to land; depth is ≥1.5 km offshore). The
-App therefore needs no second land polygon from this file; keeping it would
-cost about 0.12 MB per cell (prototype measurement) and could disagree with
-Seamap's own coastline.
+Cells keep seamap-cell-1's App contract unchanged: the same ten layer names,
+fields, per-layer zoom ranges (`vector_layers`), file layout and `cells.json`
+format.
 
-Protomaps carries islands as `earth` points, not in `places`; Protomaps
-4.15.2 has no `name:zh` key (only `name:zh-Hans`/`name:zh-Hant`), so the
-`name:zh` step only applies if a build adds it.
+| Cell layer | Zooms | OSM rule (this repository's own) | Fields |
+| --- | --- | --- | --- |
+| `seamark` | 8–14 | every `seamark:type`; piers, breakwaters, groynes, quays, wharves, pontoons from `man_made` | original `seamark:*`, names and `function`; `osm_id`, tile `zoom`; normalized `type`, `category`, `shape`, `color`, `color_pattern`, `topmark_shape`, `topmark_color`, `light_color`, `family` |
+| `land` | 8–14 | `land-polygons-complete-4326` | none: fill and coastline stroke |
+| `water` | 8–14 | `natural=water`, `waterway=riverbank`, `landuse=reservoir/basin`, `water=reservoir/basin/water` | `name`, `water` |
+| `wetland` | 8–14 | `natural=wetland` + mangrove/tidalflat/saltmarsh | `type=wetland`, `category`, `name`, `surface` |
+| `sea_area` | 8–14 | `place=sea`, `natural=bay`; polygons labelled at a point on surface | `category`, `name`, `name:zh`, `name:zh-Hans` |
+| `landuse` | 8–12 | `landuse`, `leisure`, `natural` mapped to wood/park/farmland/urban/industrial/beach; ≥ 2 px; merged by class per tile, then clipped to the tile's `land` | `class` |
+| `roads` | 8–12 | `highway=motorway(_link)` → highway; trunk/primary(_link) → major; secondary/tertiary(_link) → secondary from z11; merged by class per tile | `class` |
+| `peaks` | 11–12 | `natural=peak` nodes with a parseable `ele` | `ele` (integer m) |
+| `places` | 8–12 | named `place=island` polygons as an innermost point once ≥ 20 px; `place=town` nodes from z9, `village` from z11, `locality` at z12 | `kind`, `name` = `name:zh-Hans`, else `name:zh`, else `name` |
+| `depth` | 8–12 | `depth_product.py` (below) | `min` = band floor (20/30/50/100/200 m), cumulative polygons |
 
-### Depth: illustrative, not surveyed
+The land-layer rules cover only what the App reads (its style draws
+`island` from z8, `town` z9, `village` z11, `locality` z12 and peaks from z11),
+so features are emitted from those zooms. Protomaps' basemap profile is
+BSD-3-Clause (compatible with this LGPL-3.0-only code) but was not reused: it
+brings its own schema and extra inputs (Natural Earth, QRank) that this
+single-snapshot product does not want. `light` is not separate: lights are
+seamarks with `light_color`. `waterway` lines are not emitted because the App
+does not read them.
+
+Complete, not split, OSM land polygons are deliberate. The official split
+product has overlapping processing chunks; since the App strokes every land
+polygon edge, artificial chunk edges could become false inland coasts.
+Planetiler clips complete polygons to tile buffers instead.
+
+## Depth: illustrative, not surveyed
 
 Depth bands are interpolated from the GEBCO_2026 15″ grid. They are
 **illustrative, not a survey and not for navigation** (`示意、非测量、不可用于导航`);
@@ -259,340 +89,89 @@ the metadata of every cell and the manifest say so.
 A point is coloured with band *L* only if, at the zoom it is drawn:
 
 - bilinear GEBCO depth ≥ *L* (m below GEBCO's mean-sea-level reference), and
-- ground distance to OSM land (Protomaps z12 `earth`) ≥ 1500 m,
+- ground distance to OSM land (the same `land_polygons.shp` as the `land`
+  layer) ≥ 1500 m,
 
 and pieces smaller than 1 km² are dropped (holes are kept: filling a hole
 would claim depth where GEBCO is shallower). The producer works on z12 world
 pixels (4096 per cell side) and holds margins so that rasterising,
 contouring, generalising and MVT rounding can only shrink a band: +2 m depth,
 3 px distance, and each zoom's lattice (stride *s* = 2^(12−z)) takes the
-minimum over a Chebyshev radius *s*+2. The land mask includes 1–3 rings of
-neighbouring z12 tiles (at least 1.25 × 1.7 km at the cell's latitude), so a cell
-sees the same coast as its neighbours, and GEBCO is read beyond the cell, so
-nothing is truncated at the cell edge. Depth pooling takes the exact minimum
-of the continuous bilinear GEBCO field over each rectangle, not just its
-integer z12 samples: original GEBCO latitude/longitude node lines split the
-rectangle into bilinear subrectangles whose minima occur at corners. The
-producer enumerates these corners for each z12 pixel rectangle, then pools
-those minima over the requested rectangle. Longitudes wrap periodically at
-±180°; the existing +2 m margin is unchanged. Bands are contoured on the shared
-lattice, snapped, then clipped to tiles and end exactly on the cell edge; two
-adjacent cells produce the same edge (`tests/test_land.py` seam test).
+minimum over a Chebyshev radius *s*+2. Depth pooling takes the exact minimum
+of the continuous bilinear GEBCO field over each rectangle: original GEBCO
+node lines split it into bilinear subrectangles whose minima occur at
+corners. Longitudes wrap periodically at ±180°.
 
-Fragments are judged on a shared window: each cell computes its lattice
-256 z12 px (one z12 tile; ≈8.6 km at 28° N, ≈4.9 km at 60°) beyond its
-edges and finds connected vector components after final integer snapping
-and geometry repair, before clipping to tiles. Area is the snapped polygon
-area (holes subtracted), converted using the minimum ground scale over its
-latitude extent. A narrow connection that collapses during snapping therefore
-leaves separate components, each judged once; there is no pre-snap fragment
-filter. The keep/drop decision is a
-property of the whole component, not of the cell asking: the touched cells
-are those whose closed extents, including shared seams, intersect it.
-For a continuous closed extent [lo, hi], their indices run from
-ceil(lo / 4096) − 1 through floor(hi / 4096): a point exactly on a seam belongs
-to both cells, but even 1/16 px inside it belongs only to that side.
-Only a complete component strictly inside every one of those cells' windows
-is eligible for area-based dropping; if it covers < 1 km² it is dropped
-everywhere, otherwise it is kept. A component clipped by an observation
-window, or extending beyond the shared measurable window, is kept by every
-cell that draws it. This includes thin fragments extending beyond the window
-even when they touch no border; that is intentional, consistent behaviour.
-Strict inequalities and inclusive seam-cell membership are both required:
-an exact border point is potentially truncated, and a seam-start point belongs
-to both adjacent cells (`FragmentPropertyTests`).
+`depth_product.py index` cuts the land polygons into z8-cell pieces once
+(SQLite, z12 world pixels). Each cell rasterises the pieces of its 3×3
+neighbourhood over 1–3 rings of z12 tiles (at least 1.25 × 1.7 km at the
+cell's latitude), polygon by polygon so islands inside other polygons' holes
+stay land, so a cell sees the same coast as its neighbours.
 
-### Inputs (one release)
+Fragments are judged on a shared window reaching 256 z12 px (one z12 tile;
+≈8.6 km at 28° N) beyond the cell: connected components after final integer
+snapping, area with holes subtracted at the minimum ground scale over the
+component's latitude extent. The keep/drop decision is a property of the whole
+component: the touched cells are those whose closed extents, including shared
+seams, intersect it (indices ceil(lo / 4096) − 1 through floor(hi / 4096)).
+Only a component strictly inside every touched cell's window is eligible for
+dropping; one clipped by a window is kept by every cell that draws it
+(`FragmentPropertyTests`). Bands are then clipped to the cell; two adjacent
+cells produce the same edge (`SeamTests`).
 
-1. **Protomaps z0–12**, one local extract of build *B* (only five range
-   requests; build list at `https://build-metadata.protomaps.dev/builds.json`,
-   builds are kept about one week):
-   `pmtiles extract https://build.protomaps.com/B.pmtiles protomaps-B-z0-12.pmtiles --maxzoom=12`
-   — about 18 GB (Main's go-pmtiles 1.31.2 dry run of 20261025: 6,316,878 tiles).
-2. **Peaks z13** of the same build, only over the coastal cells, reduced to
-   `pois` kind=peak:
-   `pmtiles extract https://build.protomaps.com/B.pmtiles peaks-raw-B.pmtiles --region=coastal-region.geojson --minzoom=13 --maxzoom=13`,
-   then `land_product.py peaks peaks-raw-B.pmtiles --output peaks-B.pmtiles`
-   (`--zooms 13` is the default; the file records its zooms and the manifest
-   repeats them). Dry run of 20261025 over the 14,335 coastal cells:
-   12,403 requests, 18 GB transferred for a 17 GB archive. The raw extract is
-   transient; the peaks file is small (sample, z13: 10 kB for Dachen's cell,
-   39 kB for Hong Kong's). `peaks` refuses inputs from another build or that
-   do not cover the requested zooms. In the samples z13 holds all 207 of
-   Dachen's peaks and 1883 of the 1956 Hong Kong peaks at z14 (96 %); adding
-   z14 (`--maxzoom=14`, `--zooms 13,14`) would cost 48 GB and 14,090 requests
-   for those 4 %. z12-only peaks are not an option: the prototype measured 0
-   (Dachen) and 18 (Hong Kong) peaks at z≤12. The test fixture keeps z13–14
-   so the lift is tested over both allowed zooms.
-3. **GEBCO_2026** netCDF (`GEBCO_2026.nc`, 7,466,018,396 bytes per the
-   CEDA response recorded for the prototype), from
-   `https://dap.ceda.ac.uk/bodc/gebco/global/gebco_2026/ice_surface_elevation/netcdf/GEBCO_2026.zip?download=1`.
-4. **Coastal cell list** from a local Seamap z6 extract (`seamap-z6.pmtiles`,
-   `land` and `seamark`/`light` layers): `land_product.py cells` marks a
-   z8 cell coastal when its 16×16 px part of the z6 land raster is partly
-   land, plus cells with a z6 seamark/light point. The 2026-09-28 Seamap z6
-   extract gives 14,196 coastal cells, 14,335 with seamark cells.
+Cells whose GEBCO nodes are all no deeper than 22 m colour nothing; cells
+whose nodes are all deeper than 202 m and that have no land piece in their
+3×3 neighbourhood fill every band at every zoom. Both are decided from the
+enclosing GEBCO nodes without contouring and equal what contouring draws
+(`test_uniform_cells_skip_contouring_with_the_regions_contouring_draws`). Of
+the 65,536 cells, 23,975 are dry, 27,705 uniformly deep and 13,856 need
+contouring (GEBCO_2026 and the 2026-10-31 land polygons).
 
-   The App's `SeamapStore.swift` derives the archive URL from the TileJSON:
-   the date in `description` (`"Open Waters Seamap 2026-09-28, from
-   OpenStreetMap data 2026-09-21"`), appended as `<date>.pmtiles` to the
-   TileJSON's directory. The following commands reproduce that derivation
-   and extract only z6 from the full archive:
+`depth_product.py build` writes one Shapefile per z8 column
+(`depth/x{X}.shp`, fields `min`, `zoom`; one EPSG:4326 record per cell, zoom
+and band) plus `x{X}.json` listing the column's finished cells, and
+`identity.json` (code hash, parameters, GEBCO and land-polygon identity). A
+rerun skips finished columns and refuses a directory built from other
+inputs. Shapefiles, not a GeoPackage: Planetiler 0.10.2 reads an EPSG:4326
+GeoPackage latitude-first (its target CRS decodes north/east), which put a
+pilot's depth thousands of kilometres away. The compiler keeps every depth
+vertex (`depth_product.py` already generalised each zoom on its own lattice,
+on the 4096-per-tile grid of that zoom) and drops no small pieces.
 
-   ```sh
-   curl --fail --location -o seamap-tiles.json \
-     https://tiles.openwaters.io/seamap/tiles.json
-   SEAMAP_DATE=$(python3 -c 'import json,re; d=json.load(open("seamap-tiles.json")); print(re.search(r"Seamap ([0-9-]+)", d["description"]).group(1))')
-   pmtiles extract "https://tiles.openwaters.io/seamap/${SEAMAP_DATE}.pmtiles" \
-     seamap-z6.pmtiles --minzoom=6 --maxzoom=6
-   ```
+## Rebuild in an empty directory
 
-   On 2026-10-26 the date was `2026-09-28` and the archive HEAD reported
-   25,959,907,224 bytes. The z6 extract took five requests and is 31,401,941
-   bytes, SHA-256
-   `78cbe067445484bca4c688d53119a4fcabe3e85bdecb65719536beb819cea3f8`.
-   It is byte-for-byte identical to the prototype's
-   `/tmp/dh-seamap-r2/data/seamap-z6.pmtiles`: same pmtiles header and
-   metadata, same 2,508 tiles with identical decompressed tile hashes.
-   Its derived coastal inventory is also identical (14,196 coastal cells,
-   14,335 including seamark cells; 0 added and 0 removed). The prototype
-   file therefore came from this same `2026-09-28` archive, not an older
-   one. The cell list and `coastal-region.geojson` follow whichever Seamap
-   build `tiles.json` currently points at; always derive the date at run
-   time, record it, and regenerate both together when that build changes.
-
-Protomaps' own advice is to copy a build rather than hotlink it; each input
-above is read from the build once per release, never per cell.
-
-### Exact rebuild versus a new release
-
-The steps below derive the cell list from whatever Seamap build
-`tiles.json` names *today*, so they produce a **new release from current
-sources**. Seamap has since moved past `2026-09-28`, and Protomaps keeps
-daily builds only for a limited time; neither upstream input of
-release `20261025` is guaranteed to stay downloadable.
-
-An **exact rebuild of release `20261025`** must reuse its recorded inputs
-instead of re-deriving them: `protomaps-20261025-z0-12.pmtiles`
-(SHA-256 `c47187176824380f6b5a679d807a115ac91f5c63ee300b4280615a9622a9389d`),
-`peaks-20261025.pmtiles`
-(`d3ada5a3c5183e656e25a56db702fd5ac144df53caec9f4844292d0f0b60b21f`),
-`GEBCO_2026.nc`
-(`71ceeb56a4b917a3f2d9fe3c6da8e7c5c5e6d8185b373eca6bac9a4d61cb3223`) and the
-2026-09-28 `coastal-cells.json`
-(`6ad3a4871165e63b8a2395270ca8c9235af64221e260e914769b33b856728bee`,
-14,335 cells). Skip the `cells` and `peaks` steps and pass those files to
-`build`. The maintainer keeps these inputs offline; they are not published.
-
-### Rebuild in an empty directory
-
-Same interpreter as above (CPython 3.12.7, macOS arm64 wheels in
-`requirements.txt`). Additionally needed: go-pmtiles (verified with 1.31.2)
-and about 60 GB free disk (below).
-
-For a new release, replace `YYYYMMDD` below with the latest available date
-from [Protomaps' build list](https://build-metadata.protomaps.dev/builds.json),
-using the same `B` for the base tiles and peaks.
+Verified environment: CPython 3.12.7 with `requirements.txt` (macOS arm64
+wheels), Java 21, Maven, osmium-tool. Inputs: a dated planet PBF (record URL,
+replication date, bytes and SHA-256; about 95.6 GB), OSM Data's
+`land-polygons-complete-4326.zip` (https://osmdata.openstreetmap.de/data/land-polygons.html)
+and GEBCO_2026 (`GEBCO_2026.nc`, 7,466,018,396 bytes, from
+`https://dap.ceda.ac.uk/bodc/gebco/global/gebco_2026/ice_surface_elevation/netcdf/GEBCO_2026.zip?download=1`).
 
 ```sh
 python3.12 -m venv .venv
 .venv/bin/python -m pip install --require-hashes -r requirements.txt
 .venv/bin/python -m unittest discover -s tests -v
-B=YYYYMMDD
-pmtiles extract https://build.protomaps.com/$B.pmtiles protomaps-$B-z0-12.pmtiles --maxzoom=12
-curl --fail --location -o seamap-tiles.json https://tiles.openwaters.io/seamap/tiles.json
-SEAMAP_DATE=$(python3 -c 'import json,re; d=json.load(open("seamap-tiles.json")); print(re.search(r"Seamap ([0-9-]+)", d["description"]).group(1))')
-pmtiles extract "https://tiles.openwaters.io/seamap/${SEAMAP_DATE}.pmtiles" seamap-z6.pmtiles --minzoom=6 --maxzoom=6
-.venv/bin/python land_product.py cells --seamap-z6 seamap-z6.pmtiles \
-  --output coastal-cells.json --region-output coastal-region.geojson
-pmtiles extract https://build.protomaps.com/$B.pmtiles peaks-raw-$B.pmtiles \
-  --region=coastal-region.geojson --minzoom=13 --maxzoom=13
-.venv/bin/python land_product.py peaks peaks-raw-$B.pmtiles --output peaks-$B.pmtiles
-rm peaks-raw-$B.pmtiles
-curl --fail --location -o GEBCO_2026.zip \
-  'https://dap.ceda.ac.uk/bodc/gebco/global/gebco_2026/ice_surface_elevation/netcdf/GEBCO_2026.zip?download=1'
-unzip GEBCO_2026.zip GEBCO_2026.nc
-.venv/bin/python land_product.py build \
-  --protomaps protomaps-$B-z0-12.pmtiles --protomaps-build $B.pmtiles --peaks peaks-$B.pmtiles \
-  --gebco GEBCO_2026.nc --gebco-grid GEBCO_2026 \
-  --release $B --cells-file coastal-cells.json \
-  --output out/land --state-dir state/$B --jobs 14 --max-rss-mb 3000
-.venv/bin/python audit_land.py out/land --jobs 14
-```
-
-`build` hashes both Protomaps inputs and the GEBCO file once (cached in the
-state directory) and records them in the manifest; compare the official
-`b3sum` in `builds.json` separately if needed — this tool does not compute
-BLAKE3. Builds are resumable: every finished cell leaves a state record keyed
-by the inputs, generator hash and release; rerunning the same command skips
-them. Cells run in parallel worker processes (`--jobs`), one cell per task,
-and the run stops when a worker's peak RSS exceeds `--max-rss-mb` (finished
-cells are kept). `cells.json` and `manifest.json` are written only after
-every selected cell is built. Cells with neither land features nor depth get
-no file and no `cells.json` entry.
-
-### Output contract
-
-```text
-out/land/manifest.json
-out/land/releases/<release>/cells.json          [{"x","y","bytes","sha256"}, …]
-out/land/releases/<release>/cells/8/{x}/{y}.pmtiles
-```
-
-The manifest follows the hosting draft (id, release, zooms, layers, sources
-with build/version/bytes/sha256, depth parameters, attribution, licences,
-`generatorIdentity` = `land_product.py:land-product-1:sha256:<file hash>`,
-`cellsURL`, `cells`, plus `cellsBytes`/`cellsSHA256`/`cellCount`/`totalBytes`).
-Each cell's metadata repeats the licence, attribution, GEBCO DOI, depth
-notice, Protomaps build, GEBCO grid and generator hash.
-
-`audit_land.py` performs structural release checks without importing the
-producer, using its own pmtiles/MVT decoding (stdlib): manifest checks,
-layer/field/zoom whitelists, tile placement, metadata, bytes and sha256 against
-`cells.json`/`manifest.json`, and disk-vs-`cells.json` set equality. It reports
-each cell's bytes, features, tiles and zooms. It does not read the Protomaps
-or GEBCO sources or recompute depth geography; depth is illustrative, not
-surveyed and not for navigation. Release checks are structural only,
-followed by an R2 readback and an in-App spot check.
-
-### Measured on this machine (Apple M5 Max, 18 cores, 48 GB)
-
-Sample cells, rebuilt from the prototype's z8–12 extracts of 20261025 and
-z13 peaks from a 20261024 extract (only copy at hand; relabelled for the
-sample run), using the full `/tmp/dh-land-gebco/GEBCO_2026.nc` directly and
-read-only (no subset was needed). One worker, measured 2026-10-26. Time is
-the build's per-cell worker time; each second run used independent output
-and state directories. Load is the 1-minute average before → after each run.
-
-| Cell | With places | Without places | Time (two runs) | Load (two runs) | Peak RSS (max) |
-| --- | --- | --- | --- | --- | --- |
-| Dachen 8/214/106 | 1,489,365 B | 1,434,864 B | 15.9 s / 16.2 s | 2.6→3.5 / 2.6→2.6 | 1.23 GB |
-| Hong Kong 8/209/111 | 2,921,286 B | 2,839,448 B | 33.4 s / 33.1 s | 3.0→2.8 / 2.4→2.2 | 1.37 GB |
-
-"Without places" is the same cell with the `places` layer removed after
-the fact (measurement only; the producer has no such mode). Both independent
-rebuilds were byte-identical. The most poleward
-coastal cells (3 rings of neighbour tiles, 34 of 14,335) peaked at 0.73 GB
-without land (measured before the fragment window was added).
-
-Earlier estimate for 14,335 coastal cells with `--jobs 14` (not a
-full-window measurement): the two
-sample cells are 2.2× and 4.4× the prototype's 40-cell random coastal mean
-raw size (1.24 MB z8–12). Scaling the least-loaded single-worker times
-(22.1 s, 49.7 s) by raw size gives about 10–11 s per average cell, i.e.
-14,335 × 11 s / 14 ≈ **3 h** wall if 14 workers did not slow each other
-down. They do: an earlier 14-way run took 2.4–2.9× the single-worker time
-per cell, but that run overlapped a runaway process of mine, so the factor
-is not reliable; with 3× it would be ≈ **9 h**. Output: the samples are
-0.39× their raw z8–12 size, so about 0.5 MB per average cell, ≈ **7 GB**.
-
-Disk for one release: z0–12 extract 18 GB + GEBCO zip and netCDF ≈ 15 GB
-(zip size not measured; assumed no smaller than the netCDF) + transient
-z13 extract 17 GB (deleted after `peaks`) + output ≈ 7 GB + state and
-peaks file < 1 GB — about 60 GB at the peak, against 898 GB free on this
-machine.
-
-### Licences
-
-Land layers are derived from OpenStreetMap via Protomaps and are under the
-**Open Database License 1.0** (`Licenses/ODbL-1.0.txt`,
-https://opendatacommons.org/licenses/odbl/1-0/); attribution
-"© OpenStreetMap contributors · Protomaps". This repository is the public
-description of the derivation (ODbL 4.6). The depth layer is derived from the
-GEBCO_2026 Grid, placed in the public domain under GEBCO's terms
-(`Licenses/GEBCO-terms-of-use.txt`); attribution: GEBCO Bathymetric
-Compilation Group 2026 (2026). The GEBCO_2026 Grid - a continuous terrain
-model for oceans and land at 15 arc-second intervals.
-doi:10.5285/4f68d5c7-45eb-f999-e063-7086abc036fa. GEBCO's terms say the grid
-must not be used for navigation or for any purpose involving safety at sea.
-The test fixtures under `tests/fixtures/` (`protomaps-dachen*.pmtiles`,
-`gebco-dachen.nc`) are small extracts of the same sources under the same
-terms. `land_product.py`, `audit_land.py` and their tests are offered under
-LGPL-3.0-only like the rest of this repository.
-
-## Combined OSM Seamap cells — seamap-cell-1
-
-`planetiler/` and `seamap_product.py` extend the per-cell product with layers
-compiled directly from OpenStreetMap. They do not read, import or redistribute
-a third-party compiled Seamap archive, and do not use its attribution.
-
-```text
-OSM PBF ───────────────┐
-                       ├─ Planetiler 0.10.2, z8–14 ─ one intermediate PMTiles
-OSM land polygons ─────┘      seamark / land / water / wetland / sea_area
-                                      │
-land-product-1 PMTiles ───────────────┤ raw MVT layer messages, no reprojection
-  landuse / roads / peaks / places / depth (z8–12)
-                                      ▼
-                  one PMTiles per selected z8 cell + cells.json SHA-256/bytes
-```
-
-Planetiler is pinned in `planetiler/pom.xml` (Apache-2.0). The custom schema
-and Python splitter/merger are LGPL-3.0-only. Java 21 and Maven are the only
-additional build tools; `osmium fileinfo` records the PBF replication time.
-
-### Layers and App-facing fields
-
-| Layer | OSM source | App contract |
-| --- | --- | --- |
-| `seamark` | every `seamark:type`; piers, breakwaters, groynes, quays, wharves and pontoons from `man_made` | original `seamark:*`, names and `function`; `osm_id`, tile `zoom`; normalized `type`, `category`, `shape`, `color`, `color_pattern`, `topmark_shape`, `topmark_color`, `light_color`, `family` |
-| `land` | `land-polygons-complete-4326` | polygon fill and coastline stroke from z8 |
-| `water` | `natural=water`, `waterway=riverbank`, reservoir/basin polygons | `name`, `water` |
-| `wetland` | `natural=wetland` + mangrove/tidalflat/saltmarsh | `type=wetland`, `category`, `name`, `surface` |
-| `sea_area` | `place=sea`, `natural=bay` | `category`, Chinese/default names; polygon labels use point-on-surface |
-
-The existing five land-product layers retain their original z8–12 MVT
-messages and metadata. Combined files are z8–14. `light` is not separate:
-lights are seamarks with `light_color`, which the App style and query adapter
-consume. `waterway` is not emitted because the App does not read it. Raw
-multi-sector light tags remain available, but this lane adds no sector
-renderer or new App attributes.
-
-Complete, not split, OSM land polygons are deliberate. The official split
-product has overlapping processing chunks; since the App strokes every land
-polygon edge, artificial chunk edges could become false inland coasts.
-Planetiler clips complete polygons to tile buffers instead. This is a
-rendering correctness choice, not a reduced-resolution coastline.
-
-### Build
-
-Download fixed inputs and record actual URL, replication/data date, byte
-count and SHA-256. The current global PBF is about 95.6 GB; use a dated planet
-URL rather than relying on mutable `latest` identity. Land polygons are ODbL
-OSM coastline processing from
-`https://osmdata.openstreetmap.de/data/land-polygons.html`.
-
-```sh
 brew install openjdk@21 maven osmium-tool
-export JAVA_HOME=$(brew --prefix openjdk@21)
-export PATH="$JAVA_HOME/bin:$PATH"
+export JAVA_HOME=$(brew --prefix openjdk@21) PATH="$(brew --prefix openjdk@21)/bin:$PATH"
 mvn -q -f planetiler/pom.xml package
 unzip land-polygons-complete-4326.zip -d land-polygons-complete
+LAND=land-polygons-complete/land-polygons-complete-4326/land_polygons.shp
+.venv/bin/python depth_product.py index --land $LAND --output land-index.sqlite
+.venv/bin/python depth_product.py build --gebco GEBCO_2026.nc --gebco-grid GEBCO_2026 \
+  --land-index land-index.sqlite --output depth --all-cells --jobs 12
 java -Xmx24g -jar planetiler/target/dinghai-seamap-compiler-1.0.0.jar \
   --osm=planet-YYMMDD.osm.pbf \
   --osm_url=https://planet.openstreetmap.org/pbf/planet-YYMMDD.osm.pbf \
-  --land=land-polygons-complete/land-polygons-complete-4326/land_polygons.shp \
-  --output=seamap-osm.pmtiles --minzoom=8 --maxzoom=14 --threads=12 \
-  --tmpdir=/tmp/dinghai-seamap-planetiler
+  --land=$LAND --depth=depth --output=seamap.pmtiles \
+  --minzoom=0 --maxzoom=14 --threads=12 --tmpdir=/tmp/dinghai-seamap-planetiler
+.venv/bin/python seamap_product.py --archive seamap.pmtiles --provenance provenance.json \
+  --depth depth --release YYYYMMDD --all-cells --output out --state-dir state --jobs 8
+.venv/bin/python audit_seamap.py out
 ```
 
-Use a different `--tmpdir` for every concurrent compiler; Planetiler deletes
-and recreates that directory at startup.
-For a pilot, pre-clip **both** inputs and omit `--bounds`: use
-`osmium extract --strategy=smart -b …` for OSM and
-`land_subset.py --bbox NAME=west,south,east,north` for the land Shapefile
-(pure-Python `pyshp`, pilot only). Planetiler 0.10.2's GeoTools Shapefile
-bbox filter returned zero features for these OSM WGS84 polygons (reproduced
-with extracted files and explicit longitude-first CRS); clipping first avoids
-that upstream filter.
-The compiler forces exact global Web-Mercator bounds and rejects regional
-`--bounds`, since inferred regional bounds would reactivate that filter.
-Use `seamap_slice.py --input regional.pmtiles --output cell.pmtiles --cell X/Y`
-before combining disjoint regional archives. A selected continent polygon can
-touch tiles worldwide; slicing is the authoritative z8-cell boundary, not
-Planetiler's `--polygon` (which did not reduce output tiles in the pilot).
-The global build needs no clipping. The provenance JSON is explicit (`osm`
-may be a list when a pilot combines disjoint compilations):
+`provenance.json` names the two OSM inputs (`osm` may be a list when a pilot
+combines extracts):
+
 ```json
 {
   "osm": {"url": "https://…/planet-YYMMDD.osm.pbf", "date": "YYYY-MM-DD…", "bytes": 0, "sha256": "…"},
@@ -600,53 +179,123 @@ may be a list when a pilot combines disjoint compilations):
 }
 ```
 
-Merge against a completed land-product-1 resource root. `--cell X/Y` may be
-repeated; `--cells-file` takes the existing coastal-cell JSON; `--all-cells`
-writes all 65,536 z8 cells. Unlike land-product-1, an empty ocean cell still
-gets a small PMTiles and manifest entry so coverage and size are unambiguous.
-Builds resume by input/generator identity and write the manifest only after
-every selected cell succeeds.
+Use a different `--tmpdir` for every concurrent compiler; Planetiler deletes
+and recreates it. The compiler forces exact global Web-Mercator bounds and
+rejects regional `--bounds`: Planetiler 0.10.2's GeoTools Shapefile bbox
+filter returned zero features for these WGS84 polygons. For a pilot,
+pre-clip the OSM input (`osmium extract --strategy=smart -p region.geojson`)
+and the land polygons (`land_subset.py land_polygons.shp pilot/land_polygons.shp
+--bbox W,S,E,N …`), build depth only for the pilot cells (`--cell X/Y`), and
+slice with `--cell X/Y`. The overview of a pilot covers only its region.
 
-```sh
-python3.12 seamap_product.py \
-  --osm-pmtiles seamap-osm.pmtiles --provenance provenance.json \
-  --land-release out/land --release YYYYMMDD \
-  --all-cells --output out/seamap --state-dir state/seamap --jobs 4
-python3.12 audit_seamap.py out/seamap
+`seamap_product.py` resumes cells by input/generator identity, rewrites the
+overview every run, and writes `cells.json` and `manifest.json` only after every
+selected cell succeeds. `cells.json` entries carry `bytes`/`sha256` and
+per-layer statistics (`mvtBytes` uncompressed, `gzipBytes` per layer for
+diagnosis only); worker `seconds` stay in the resume state.
+
+### Pilot against seamap-cell-1 (2026-11-03)
+
+Five cells from `planet-261026` (an `osmium extract --strategy=smart` of the
+cells plus 0.25°), the 2026-10-31 land polygons (`land_subset.py`) and
+GEBCO_2026, compared with seamap-cell-1 cells rebuilt from the same planet's
+marine archive and land-product-1 release 20261028. `vector_layers` metadata
+and every layer's field-name set are identical in all five.
+
+| Cell | seamap-cell-1 B | seamap-cell-2 B | Change |
+| --- | ---: | ---: | --- |
+| Hong Kong 8/209/111 | 7,180,492 | 7,172,551 | −0.1 % |
+| Dachen 8/214/106 | 3,311,913 | 3,409,391 | +2.9 % |
+| Malta 8/138/100 | 839,247 | 836,065 | −0.4 % |
+| Offshore 8/225/113 | 1,028 | 5,416 | depth bands added (341 tiles, deduplicated) |
+| Inland 8/203/99 | 478,200 | 502,109 | +5.0 % |
+
+Per layer: `seamark`, `water`, `wetland` and `sea_area` are unchanged except
+one Malta submarine cable that has no node inside the pilot extract. Depth differs by at most 3 features per
+cell (OSM land instead of Protomaps `earth` as the offshore mask; +2–6 %
+bytes). Roads keep the same per-class-per-tile feature counts at −22…+6 %
+bytes; land use +10…+15 %; land −1 %; places +6…+63 % (OSM names and islands instead
+of Protomaps' label thinning); peaks are now all present at z11 as well as
+z12 (2× features, ≈ 40 KB more for Hong Kong). seamap-cell-1 had no depth in
+cells outside land-product-1's coastal list, so its deep-water cells met
+coastal cells' 200 m band at a cell edge; every ocean cell now carries its
+bands. Total 11,810,880 → 11,925,532 B (+1.0 %). Pilot compile: 71–179 s,
+≤ 5.3 GB peak RSS (6 threads).
+
+### Global overview check (2026-11-03)
+
+The z0–7 layers depend only on the land polygons and water areas, so the
+global overview was compiled by the same jar from an `osmium tags-filter`
+of `planet-261026` (`a/natural=water a/waterway=riverbank
+a/landuse=reservoir,basin a/water`, 6.0 GB) with the complete land polygons,
+`--maxzoom=7`: 274 s, then cut by `build_overview`. The file is
+**17,860,905 bytes** (21,845 possible tiles, 11,604 present; z7 is 12.0 MB,
+z6 4.0 MB, z5 1.3 MB, z0–4 0.75 MB), against 82,470,346 bytes zipped
+(110,059,520 unzipped) for GSHHG python-product-2.
+
+### Global run estimate (not run)
+
+Measured on this machine (Apple M5 Max, 18 cores, 48 GB) while other
+production ran (load 4–450):
+
+- land index: 248 s, 1.38 GB, 2.8 GB peak RSS;
+- depth: 10–14 s per contoured cell with 5 workers, ≈ 1.5 GB RSS each;
+  uniform cells take milliseconds. 13,856 contoured cells at 12 workers:
+  about 4 h, up to 6 h under load. Output about 10–20 GB of Shapefiles
+  (pilot: 0.4–2.0 MB per coastal cell);
+- compile: seamap-cell-1's marine-only global compile took about 1.5 h at
+  `-Xmx24g`; the land layers (global land use is the largest), depth and
+  z0–7 add work: expect 2–4 h;
+- cutting: 0.2–1.3 s per cell with 5 threads, about 1–2 h for all cells.
+
+Disk beyond the inputs (planet 95.6 GB, land ZIP and Shapefile 2.2 GB, GEBCO
+7.5 GB): land index 1.4 GB, depth 10–20 GB, Planetiler temporary data
+≈ 150 GB at its peak (seamap-cell-1's run peaked at 229 GB including the
+planet), compiled archive and release ≈ 20–30 GB each. Plan for **≈ 250 GB
+free** besides the inputs.
+
+## Output contract
+
+```text
+out/manifest.json
+out/releases/<release>/overview.pmtiles                 z0–7, land / water
+out/releases/<release>/cells.json                       [{"x","y","bytes","sha256","layers"}, …]
+out/releases/<release>/cells/8/{x}/{y}.pmtiles          z8–14, every selected cell
 ```
 
-`cells.json` entries include actual `bytes`/`sha256` and per-layer feature/byte
-statistics; worker `seconds` stays in resume state and stdout so the release
-is deterministic. `mvtBytes` is uncompressed MVT Layer
-message bytes; `gzipBytes` compresses each layer separately for diagnosis and
-is **not** an additive physical PMTiles layout. Only top-level `bytes` and
-manifest `totalBytes` are download sizes.
+`manifest.json`: `id` `dinghai-seamap`, `schemaVersion` 2, `gridZoom` 8,
+`minimumZoom` 8, `maximumZoom` 14, `layers`, `cellsURL`, `cells`,
+`cellsBytes`, `cellsSHA256`, `cellCount`, `totalBytes` (as seamap-cell-1),
+plus `overview` = `{"url", "bytes", "sha256", "minimumZoom": 0,
+"maximumZoom": 7, "layers": ["land", "water"]}`, `sources` (OSM, land
+polygons, GEBCO, compiled archive), `depth` parameters and notice, licences,
+`generatorIdentity` and `depthGeneratorIdentity`. Every cell's metadata
+repeats licence, attribution, GEBCO DOI, depth notice and source identities;
+an empty cell still gets a file and entry.
 
-`audit_seamap.py` independently checks hashes, inventory, tile/cell/zoom
-placement, layers and metadata. It does not establish complete or
-navigation-grade geography. No scheduler, CI rebuild, R2 upload or App change
-is included; monthly or quarterly manual regeneration is sufficient.
+`audit_seamap.py` checks hashes and sizes, inventory, overview zooms and
+layers, cell tile placement, layers and zooms, and metadata. It does not
+establish complete or navigation-grade geography.
 
-### App integration boundary
+## App integration boundary
 
-This lane produces **one** `dinghai-seamap` schema-2 file per cell. The current
-App expects a third-party archive plus a separate `dinghai-land` schema-1
-file, so it cannot open this new manifest unchanged. A later App lane must
-point `seamap`, land/depth and query sources at the same per-cell PMTiles and
-read the schema-2 manifest. Existing style field names otherwise remain the
-contract. This is not a second compatibility archive or dual-write release.
+The cells keep the schema-2 contract of seamap-cell-1, so the App's per-cell
+package switch needs no change for them. Replacing the GSHHG background with
+the overview (`overview` in the manifest; layers above) and updating the App's
+attribution text, which still names Protomaps, belong to App lanes. This
+repository makes no App change, upload or deployment.
 
-### Aggregate-only third-party comparison
+## Licences
 
-`compare_pilot.py` is not a producer. For explicitly selected pilot cells it
-uses public TileJSON to locate the current archive, reads only z14 tile ranges
-needed for those cells into memory, coalesces ranges (64 KiB maximum gap,
-4 MiB maximum request), and prints only aggregate counts by category/type and
-request-byte totals. It never writes a remote response, tile, feature,
-geometry or attribute to disk and is never an input to either generator.
-Different OSM dates and feature normalization mean counts need not be equal.
-
-```sh
-python3.12 compare_pilot.py --release-root out/seamap --release YYYYMMDD-pilot \
-  --cell 209/111 --cell 214/106 --cell 138/100 --cell 225/113 --cell 203/99
-```
+All layers except depth, and the whole overview, are derived from
+OpenStreetMap and OSM Data's land polygons, © OpenStreetMap contributors,
+**Open Database License 1.0** (`Licenses/ODbL-1.0.txt`); this repository is the
+public description of the derivation (ODbL 4.6). The depth layer is derived
+from the GEBCO_2026 Grid, public domain under GEBCO's terms
+(`Licenses/GEBCO-terms-of-use.txt`): GEBCO Bathymetric Compilation Group 2026
+(2026). The GEBCO_2026 Grid - a continuous terrain model for oceans and land at
+15 arc-second intervals. doi:10.5285/4f68d5c7-45eb-f999-e063-7086abc036fa. It
+must not be used for navigation or for any purpose involving safety at sea.
+Planetiler (Apache-2.0) is a build dependency. The generator code, audit and
+tests are offered under **LGPL-3.0-only** (`Licenses/LGPL-3.0.txt`,
+`Licenses/GPL-3.0.txt`). See `NOTICE.txt`.

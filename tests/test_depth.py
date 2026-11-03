@@ -1,6 +1,4 @@
 # SPDX-License-Identifier: LGPL-3.0-only
-import gzip
-import json
 import math
 import shutil
 import tempfile
@@ -8,116 +6,28 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-import mapbox_vector_tile as mvt
 import netCDF4
 import numpy as np
+import shapefile
 import shapely
-import shapely.affinity
-from pmtiles.tile import zxy_to_tileid
 
-import audit_land
-import land_product as lp
+import depth_product as dp
 
 FIXTURES = Path(__file__).parent / "fixtures"
-DACHEN = (214, 106)
-SEA = (100, 100)  # no source tiles, no GEBCO coverage: must not produce a file
-BLOCK = [(x, y) for x in range(3424, 3428) for y in range(1697, 1701)] + \
-    [(x, y) for x in range(3434, 3438) for y in range(1708, 1712)]  # fixture z12 tiles
 
 
-def build_release(root, cells, release="test"):
-    peaks = root / "peaks.pmtiles"
-    if not peaks.exists():
-        # The fixture keeps both z13 and z14 so the lift is exercised over the whole allowed range.
-        lp.make_peaks([FIXTURES / "protomaps-dachen-z13-14.pmtiles"], peaks, zooms=(13, 14), log=lambda *_: None)
-    return lp.build(FIXTURES / "protomaps-dachen.pmtiles", "20261025.pmtiles", peaks,
-                    FIXTURES / "gebco-dachen.nc", "GEBCO_2026", release, cells, root / "land",
-                    root / "state", log=lambda *_: None)
-
-
-def cell_tiles(path):
-    _, meta, tiles = audit_land.read_pmtiles(Path(path).read_bytes())
-    return meta, {audit_land._zxy(t): audit_land.decode_tile(gzip.decompress(b)) for t, b in tiles.items()}
-
-
-def depth_region(tiles, zoom, band=20):
-    """Read generated MVT at its public geometry boundary, not through audit geography helpers."""
-    polygons = []
-    for (z, x, y), layers in tiles.items():
-        if z != zoom or "depth" not in layers:
-            continue
-        layer = layers["depth"]
-        stride = 1 << (12 - z)
-        scale = 256 * stride / layer["extent"]
-        for feature in layer["features"]:
-            if feature["properties"]["min"] == band:
-                polygons.append(shapely.affinity.affine_transform(
-                    shapely.geometry.shape(feature["geometry"]),
-                    [scale, 0, 0, scale, x * 256 * stride, y * 256 * stride]))
-    return shapely.union_all(polygons)
-
-
-class LandCellTests(unittest.TestCase):
-    @classmethod
-    def setUpClass(cls):
-        cls.temporary = tempfile.TemporaryDirectory()
-        cls.root = Path(cls.temporary.name)
-        cls.manifest = build_release(cls.root, [DACHEN, SEA])
-        cls.cell = cls.root / "land/releases/test/cells/8/214/106.pmtiles"
-
-    @classmethod
-    def tearDownClass(cls):
-        cls.temporary.cleanup()
-
-    def test_sample_cell_has_only_whitelisted_layers_zooms_and_license_metadata(self):
-        # Regression: a dropped layer (buildings/boundaries/pois/earth/water) or a z13+ tile leaking,
-        # or a missing licence/attribution key, fails here at the published-file boundary.
-        meta, tiles = cell_tiles(self.cell)
-        self.assertEqual({z for z, _, _ in tiles}, {8, 9, 10, 11, 12})
-        layers = set().union(*(t.keys() for t in tiles.values()))
-        self.assertEqual(layers, set(lp.LAYERS))
-        self.assertEqual(meta["dinghai:landLicense"], "ODbL-1.0")
-        self.assertEqual(meta["dinghai:landLicenseURL"], "https://opendatacommons.org/licenses/odbl/1-0/")
-        self.assertEqual(meta["dinghai:landAttribution"], "© OpenStreetMap contributors · Protomaps")
-        self.assertIn("doi:10.5285/4f68d5c7-45eb-f999-e063-7086abc036fa", meta["dinghai:depthAttribution"])
-        self.assertIn("非测量，不可用于导航", meta["dinghai:depthNotice"])
-        self.assertEqual(meta["dinghai:protomapsBuild"], "20261025.pmtiles")
-        self.assertEqual(meta["dinghai:gebcoGrid"], "GEBCO_2026")
-        self.assertEqual(meta["dinghai:generatorSHA256"], lp.generator_sha256())
-
-    def test_z12_peaks_are_lifted_from_z13_14(self):
-        # Protomaps carries almost no peaks at z<=12; losing the z13-14 lift empties this layer.
-        _, tiles = cell_tiles(self.cell)
-        source = lp.Archive(FIXTURES / "protomaps-dachen.pmtiles")
-        own = sum(len(lp.own_peaks(lp.split_layers(source.get(12, x, y)))) for x, y in BLOCK)
-        lifted = sum(len(tiles.get((12, x, y), {}).get("peaks", (0, []))[1]) for x, y in BLOCK)
-        self.assertGreater(lifted, own + 50)
-
-    def test_release_lists_bytes_and_sha_skips_empty_cells_resumes_and_audit_catches_tampering(self):
-        cells = json.loads((self.root / "land/releases/test/cells.json").read_text())
-        self.assertEqual([(c["x"], c["y"]) for c in cells], [DACHEN])
-        self.assertFalse((self.root / "land/releases/test/cells/8/100").exists())
-        self.assertEqual(self.manifest["cellCount"], 1)
-        self.assertEqual(self.manifest["cells"], "releases/test/cells.json")
-        audit_land.audit(self.root / "land")
-        before = self.cell.stat().st_mtime_ns
-        build_release(self.root, [DACHEN, SEA])  # resume: nothing rebuilt
-        self.assertEqual(self.cell.stat().st_mtime_ns, before)
-        for mutate, message in ((lambda root: _flip(root / "land/releases/test/cells/8/214/106.pmtiles"), "sha256"),
-                                (lambda root: (root / "land/releases/test/cells/8/1").mkdir(parents=True)
-                                 or (root / "land/releases/test/cells/8/1/1.pmtiles").write_bytes(b"x"), "differ")):
-            with tempfile.TemporaryDirectory() as temporary:
-                copy = Path(temporary) / "copy"
-                shutil.copytree(self.root / "land", copy / "land")
-                mutate(copy)
-                with self.assertRaisesRegex(ValueError, message):
-                    audit_land.audit(copy / "land")
-
-
-def _flip(path):
-    data = bytearray(path.read_bytes())
-    data[-1] ^= 1
-    path.write_bytes(bytes(data))
+def land_index(root, polygons):
+    """OSM-style land polygons (z12 world px) written as a lon/lat Shapefile and cut by the
+    real index command, so tests read land through the same boundary as a release."""
+    shp = root / "land_polygons.shp"
+    with shapefile.Writer(str(shp.with_suffix("")), shapeType=shapefile.POLYGON) as writer:
+        writer.field("FID", "N", size=11)
+        for fid, polygon in enumerate(polygons):
+            ring = np.asarray(polygon.exterior.coords)
+            writer.poly([list(zip(dp.lon_of_px(ring[:, 0]), dp.lat_of_px(ring[:, 1])))])
+            writer.record(fid)
+    dp.build_index(shp, root / "land.sqlite", log=lambda *_: None)
+    return dp.open_index(root / "land.sqlite")
 
 
 class FragmentTests(unittest.TestCase):
@@ -127,13 +37,9 @@ class FragmentTests(unittest.TestCase):
         # Review's GEBCO source catches fractional extents missed by integer-border tests:
         # the complete 280829 m² strip touches only 215/106, not its western neighbour.
         with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            protomaps, peaks = root / "protomaps.pmtiles", root / "peaks.pmtiles"
-            lp.write_pmtiles(protomaps, {}, {}, (-180, -85, 180, 85), 0, 12)
-            lp.write_pmtiles(peaks, {}, {"dinghai:peakZooms": [13]}, (-180, -85, 180, 85), 13, 13)
-            tiles, _ = lp.build_cell(lp.Archive(protomaps), lp.Archive(peaks),
-                                     lp.Gebco(FIXTURES / "gebco-fractional.nc"), 215, 106)
-        self.assertFalse(tiles, "a complete sub-km² component must produce no depth tiles")
+            index = land_index(Path(temporary), [])
+            regions = dp.build_cell(index, dp.Gebco(FIXTURES / "gebco-fractional.nc"), 215, 106)
+        self.assertFalse(regions, "a complete sub-km² component must produce no depth")
 
     def _keep_all(self, bump):
         return self.build(bump, {(214, 106): 0, (215, 106): 0})
@@ -142,20 +48,18 @@ class FragmentTests(unittest.TestCase):
         patch = patch or {}
         seam = 215 * 4096
         with tempfile.TemporaryDirectory() as temporary:
-            protomaps, peaks, gebco = _synthetic_two_cells(Path(temporary), seam, bump)
-            sources = lp.Archive(protomaps), lp.Archive(peaks), lp.Gebco(gebco)
+            index, gebco = _synthetic_two_cells(Path(temporary), seam, bump)
+            grid = dp.Gebco(gebco)
             out = {}
             for cell in ((214, 106), (215, 106)):
-                with mock.patch.object(lp, "MIN_FRAGMENT_M2", patch.get(cell, lp.MIN_FRAGMENT_M2)):
-                    tiles, _ = lp.build_cell(*sources, *cell)
-                out[cell] = {lp.tileid_to_zxy(t): mvt.decode(gzip.decompress(v), default_options={"y_coord_down": True})
-                             for t, v in tiles.items()}
+                with mock.patch.object(dp, "MIN_FRAGMENT_M2", patch.get(cell, dp.MIN_FRAGMENT_M2)):
+                    out[cell] = dp.build_cell(index, grid, *cell)
         return out
 
     @staticmethod
     def reviewer_window_pooled(cx):
         """The reviewer's probe: a 189 km2 lake in 214 and a 3-node channel into 215."""
-        w, c, cy = lp.FRAGMENT_WINDOW_PX, lp.CELL_PX, 106
+        w, c, cy = dp.FRAGMENT_WINDOW_PX, dp.CELL_PX, 106
         seam, y0 = 215 * c, cy * c + 1000
 
         def field(gx, gy):
@@ -179,7 +83,7 @@ class FragmentTests(unittest.TestCase):
     @staticmethod
     def border_pooled(cx, cy, zoom, side, offset=0):
         """A small ribbon ending exactly on a window border, or one node inside it."""
-        w, c = lp.FRAGMENT_WINDOW_PX, lp.CELL_PX
+        w, c = dp.FRAGMENT_WINDOW_PX, dp.CELL_PX
         s = 1 << (12 - zoom)
         seam = (215 if side in ("E", "W") else 107) * c
         thickness = 2 * s if zoom == 12 else s
@@ -223,29 +127,28 @@ class FragmentTests(unittest.TestCase):
                  ("E", 11, ((214, 106), (215, 106)))]
         for side, zoom, cells in cases:
             with self.subTest(side=side, zoom=zoom, offset=0):
-                counts = [sum(1 for k in lp.depth_tiles(self.border_pooled(*cell, zoom, side), *cell)
-                              if k[0] == zoom) for cell in cells]
-                self.assertTrue(all(counts), (side, zoom, counts))
+                drawn = [any(z == zoom for z, _ in dp.depth_regions(self.border_pooled(*cell, zoom, side), *cell))
+                         for cell in cells]
+                self.assertTrue(all(drawn), (side, zoom, drawn))
             with self.subTest(side=side, zoom=zoom, offset=-1):
-                counts = [sum(1 for k in lp.depth_tiles(self.border_pooled(*cell, zoom, side, -1), *cell)
-                              if k[0] == zoom) for cell in cells]
-                self.assertEqual(counts, [0, 0], (side, zoom, counts))
+                drawn = [any(z == zoom for z, _ in dp.depth_regions(self.border_pooled(*cell, zoom, side, -1), *cell))
+                         for cell in cells]
+                self.assertEqual(drawn, [False, False], (side, zoom, drawn))
 
     def test_window_border_component_is_kept_in_both_cells(self):
         # Regression: a thin neck from a large fragment outside 215's window reached its
         # border; treating that truncated component as whole dropped 215's 100 px part.
-        tiles = {cx: lp.depth_tiles(self.reviewer_window_pooled(cx), cx, 106)
-                 for cx in (214, 215)}
         for cx, tx in ((214, 3439), (215, 3440)):
-            self.assertTrue(any(z == 12 and x == tx
-                                for z, x, _ in tiles[cx]), (cx, sorted(tiles[cx])))
+            region = dp.depth_regions(self.reviewer_window_pooled(cx), cx, 106).get((12, 20))
+            column = shapely.box(tx * 256, 0, (tx + 1) * 256, dp.WORLD_PX)
+            self.assertTrue(region is not None and region.intersection(column).area > 0, cx)
 
     @staticmethod
-    def areas(decoded, z):
-        """Ground areas from generated MVT, independent of the producer's area rule."""
+    def areas(regions, z):
+        """Ground areas of the generated polygons, independent of the producer's area rule."""
         out = {}
-        for cell, tiles in decoded.items():
-            region = depth_region(tiles, z)
+        for cell, cell_regions in regions.items():
+            region = cell_regions[(z, 20)]
             ymin, ymax = region.bounds[1], region.bounds[3]
             mpp = min(2 * math.pi * 6378137 / (256 << 12)
                       / math.cosh(math.pi * (1 - 2 * gy / (256 << 12))) for gy in (ymin, ymax))
@@ -255,11 +158,9 @@ class FragmentTests(unittest.TestCase):
     def test_small_fragment_across_the_seam_is_dropped_by_both_cells(self):
         # Regression: a piece touching a cell edge used to be kept regardless of area (a 29 m2
         # piece in the Hong Kong sample); 2x2 GEBCO nodes make 0.65 km2 in total at z12.
-        decoded = self.build((2, 2))
-        for cell, tiles in decoded.items():
-            self.assertFalse(any("depth" in layers for layers in tiles.values()), cell)
-        everything = self._keep_all((2, 2))  # fragment rule off: the fragment as drawn
-        areas = self.areas(everything, 12)
+        for cell, regions in self.build((2, 2)).items():
+            self.assertFalse(regions, cell)
+        areas = self.areas(self._keep_all((2, 2)), 12)  # fragment rule off: the fragment as drawn
         self.assertLess(sum(areas.values()), 1_000_000)
         self.assertTrue(all(a > 0 for a in areas.values()), "the fragment must reach both cells")
 
@@ -278,18 +179,15 @@ class ContourTests(unittest.TestCase):
         pooled = {}
         for z in range(8, 13):
             stride = 1 << (12 - z)
-            n = (lp.CELL_PX + 2 * lp.FRAGMENT_WINDOW_PX) // stride + 1
+            n = (dp.CELL_PX + 2 * dp.FRAGMENT_WINDOW_PX) // stride + 1
             depth = np.zeros((n, n), np.float32)
             if z == zoom:
                 depth[200:220, 200:220] = 40
                 depth[209:212, 230:233] = 40
                 depth[210, 220:230] = 20.01
             pooled[z] = depth, np.full_like(depth, 1000)
-        features = lp.depth_tiles(pooled, cx, cy)
-        decoded = {key: mvt.decode(lp.encode_layers([{"name": "depth", "features": fs}], lp.EXTENT),
-                                   default_options={"y_coord_down": True}) for key, fs in features.items()}
-        region = depth_region(decoded, zoom)
-        origin = np.array([cx, cy]) * lp.CELL_PX - lp.FRAGMENT_WINDOW_PX
+        region = dp.depth_regions(pooled, cx, cy)[(zoom, 20)]
+        origin = np.array([cx, cy]) * dp.CELL_PX - dp.FRAGMENT_WINDOW_PX
         self.assertTrue(region.covers(shapely.Point(*(origin + np.array([210, 210]) * 8))))
         self.assertFalse(region.covers(shapely.Point(*(origin + np.array([231, 210]) * 8))))
 
@@ -304,9 +202,9 @@ class ContourTests(unittest.TestCase):
         values[1:3, 2] = -1
         shell_only = values.copy()
         shell_only[1:3, 2] = 1
-        region = lp.contour_region(xs, ys, values)
+        region = dp.contour_region(xs, ys, values)
         self.assertFalse(region.contains(shapely.Point(32, 24)))
-        self.assertLess(region.area, lp.contour_region(xs, ys, shell_only).area)
+        self.assertLess(region.area, dp.contour_region(xs, ys, shell_only).area)
 
 
 class FragmentPropertyTests(unittest.TestCase):
@@ -314,7 +212,7 @@ class FragmentPropertyTests(unittest.TestCase):
 
     @staticmethod
     def cases():
-        w, c = lp.FRAGMENT_WINDOW_PX, lp.CELL_PX
+        w, c = dp.FRAGMENT_WINDOW_PX, dp.CELL_PX
         sx, sy = 215 * c, 107 * c
         result = []
         for zoom in (12, 11):
@@ -350,16 +248,16 @@ class FragmentPropertyTests(unittest.TestCase):
         """Closed cell extents, independently of the producer's component predicate."""
         minx, miny, maxx, maxy = shape.bounds
         cells = []
-        for cx in range(math.floor(minx / lp.CELL_PX) - 1, math.floor(maxx / lp.CELL_PX) + 2):
-            for cy in range(math.floor(miny / lp.CELL_PX) - 1, math.floor(maxy / lp.CELL_PX) + 2):
-                if shapely.box(cx * lp.CELL_PX, cy * lp.CELL_PX,
-                               (cx + 1) * lp.CELL_PX, (cy + 1) * lp.CELL_PX).intersects(shape):
+        for cx in range(math.floor(minx / dp.CELL_PX) - 1, math.floor(maxx / dp.CELL_PX) + 2):
+            for cy in range(math.floor(miny / dp.CELL_PX) - 1, math.floor(maxy / dp.CELL_PX) + 2):
+                if shapely.box(cx * dp.CELL_PX, cy * dp.CELL_PX,
+                               (cx + 1) * dp.CELL_PX, (cy + 1) * dp.CELL_PX).intersects(shape):
                     cells.append((cx, cy))
         return cells
 
     @staticmethod
     def build_shape(shape, zoom, cell):
-        w, c = lp.FRAGMENT_WINDOW_PX, lp.CELL_PX
+        w, c = dp.FRAGMENT_WINDOW_PX, dp.CELL_PX
         cx, cy = cell
         out = {}
         for z in range(8, 13):
@@ -371,7 +269,7 @@ class FragmentPropertyTests(unittest.TestCase):
             values = (shapely.intersects_xy(shape, x, y).astype(np.float32) * 25
                       if z == zoom else np.zeros((n, n), np.float32))
             out[z] = (values, np.full((n, n), 1000.0, np.float32))
-        return lp.depth_tiles(out, cx, cy)
+        return dp.depth_regions(out, cx, cy)
 
     def test_88_shapes_have_cell_independent_keep_decisions(self):
         # Independent closed-cell geometry determines touched cells and the small/complete
@@ -381,7 +279,7 @@ class FragmentPropertyTests(unittest.TestCase):
         for shape, zoom, label in cases:
             cells = self.touched_cells(shape)
             self.assertTrue(cells, label)
-            drawn = {cell: any(k[0] == zoom for k in self.build_shape(shape, zoom, cell))
+            drawn = {cell: any(z == zoom for z, _ in self.build_shape(shape, zoom, cell))
                      for cell in cells}
             decision = next(iter(drawn.values()))
             with self.subTest(shape=label, cells=cells):
@@ -389,24 +287,60 @@ class FragmentPropertyTests(unittest.TestCase):
                                 (label, drawn))
             minx, miny, maxx, maxy = shape.bounds
             strictly_inside = all(
-                minx > cx * lp.CELL_PX - lp.FRAGMENT_WINDOW_PX
-                and miny > cy * lp.CELL_PX - lp.FRAGMENT_WINDOW_PX
-                and maxx < (cx + 1) * lp.CELL_PX + lp.FRAGMENT_WINDOW_PX
-                and maxy < (cy + 1) * lp.CELL_PX + lp.FRAGMENT_WINDOW_PX
+                minx > cx * dp.CELL_PX - dp.FRAGMENT_WINDOW_PX
+                and miny > cy * dp.CELL_PX - dp.FRAGMENT_WINDOW_PX
+                and maxx < (cx + 1) * dp.CELL_PX + dp.FRAGMENT_WINDOW_PX
+                and maxy < (cy + 1) * dp.CELL_PX + dp.FRAGMENT_WINDOW_PX
                 for cx, cy in cells)
-            area = shape.area * float(lp.mpp_of_px(np.array([(miny + maxy) / 2]))[0]) ** 2
+            area = shape.area * float(dp.mpp_of_px(np.array([(miny + maxy) / 2]))[0]) ** 2
             if strictly_inside and area < 500_000:
                 with self.subTest(shape=label, small_complete=True):
                     self.assertFalse(any(drawn.values()), (label, area, drawn))
 
 
 class SeamTests(unittest.TestCase):
+    def test_uniform_cells_skip_contouring_with_the_regions_contouring_draws(self):
+        # Most of the 65,536 cells are open ocean or dry land: the shortcut must give exactly
+        # what the full field/contour path gives, and must not apply near land.
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            index, gebco = _synthetic_two_cells(root, 215 * dp.CELL_PX)
+            empty = land_index(root / "empty", [])
+            for elevation, land, uniform in ((-1000, empty, True), (100, index, True), (-1000, index, False)):
+                flat = root / f"gebco{elevation}.nc"
+                if not flat.exists():
+                    shutil.copyfile(gebco, flat)
+                    with netCDF4.Dataset(flat, "a") as ds:
+                        ds["elevation"][:] = elevation
+                grid = dp.Gebco(flat)
+                with self.subTest(elevation=elevation, land=land is index):
+                    shortcut = dp.uniform_regions(land, grid, 214, 106)
+                    self.assertEqual(shortcut is not None, uniform)
+                    if uniform:
+                        full = dp.depth_regions(dp.pooled_fields(*dp.depth_fields(land, grid, 214, 106)), 214, 106)
+                        self.assertEqual(set(shortcut), set(full))
+                        self.assertTrue(all(shortcut[key].equals(full[key]) for key in full))
+
+    def test_bands_stay_offshore_of_osm_land(self):
+        # The offshore mask now comes from OSM land polygons through the land index: a lost,
+        # shifted or flipped land piece would colour water within 1.5 km of the island.
+        seam = 215 * dp.CELL_PX
+        with tempfile.TemporaryDirectory() as temporary:
+            index, gebco = _synthetic_two_cells(Path(temporary), seam)
+            regions = dp.build_cell(index, dp.Gebco(gebco), 214, 106)
+        island = _island(seam)
+        mpp = float(dp.mpp_of_px(island.centroid.y))
+        for zoom in range(8, 13):
+            with self.subTest(zoom=zoom):
+                region = regions[(zoom, 20)]
+                self.assertGreaterEqual(region.distance(island) * mpp, dp.OFFSHORE_M)
+
     def test_original_gebco_shallow_node_between_z12_nodes_is_not_coloured(self):
         # Existing smooth-grid coverage misses the resampling regression: a 4 m knot
         # surrounded by 1000 m nodes can be shallower than every integer z12 sample.
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            protomaps, peaks, gebco = _synthetic_two_cells(root, 215 * lp.CELL_PX)
+            index, gebco = _synthetic_two_cells(root, 215 * dp.CELL_PX)
             with netCDF4.Dataset(gebco, "a") as ds:
                 lat, lon = ds["lat"][:], ds["lon"][:]
                 xs = (lon + 180) / 360 * (256 << 12)
@@ -418,12 +352,10 @@ class SeamTests(unittest.TestCase):
                 ds["elevation"][:] = -1000
                 ds["elevation"][i, j] = -4
                 point = shapely.Point(float(xs[j]), float(ys[i]))
-            tiles, _ = lp.build_cell(lp.Archive(protomaps), lp.Archive(peaks), lp.Gebco(gebco), 214, 106)
-            decoded = {lp.tileid_to_zxy(t): mvt.decode(gzip.decompress(v), default_options={"y_coord_down": True})
-                       for t, v in tiles.items()}
+            regions = dp.build_cell(index, dp.Gebco(gebco), 214, 106)
         for zoom in range(8, 13):
             with self.subTest(zoom=zoom):
-                region = depth_region(decoded, zoom)
+                region = regions[(zoom, 20)]
                 self.assertGreater(region.area, 0)
                 self.assertFalse(region.covers(point))
 
@@ -434,25 +366,24 @@ class SeamTests(unittest.TestCase):
         a, b = (214, 106), (215, 106)
         seam = 215 * 4096
         with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            protomaps, peaks, gebco = _synthetic_two_cells(root, seam)
-            archive, peak_archive, grid = lp.Archive(protomaps), lp.Archive(peaks), lp.Gebco(gebco)
-            decoded = {}
-            for cell in (a, b):
-                tiles, _ = lp.build_cell(archive, peak_archive, grid, *cell)
-                decoded[cell] = {lp.tileid_to_zxy(t): mvt.decode(gzip.decompress(v), default_options={"y_coord_down": True})
-                                 for t, v in tiles.items()}
+            index, gebco = _synthetic_two_cells(Path(temporary), seam)
+            grid = dp.Gebco(gebco)
+            regions = {cell: dp.build_cell(index, grid, *cell) for cell in (a, b)}
         line = shapely.LineString([(seam, 106 * 4096), (seam, 107 * 4096)])
         crossing = 0
         for z in range(8, 13):
-            for band in lp.DEPTH_BANDS_M:
+            for band in dp.DEPTH_BANDS_M:
                 cuts = []
                 for cell in (a, b):
-                    region = depth_region(decoded[cell], z, band)
+                    region = regions[cell].get((z, band), shapely.MultiPolygon())
                     cuts.append(region.boundary.union(region).intersection(line))
                 self.assertAlmostEqual(cuts[0].symmetric_difference(cuts[1]).length, 0, places=6, msg=(z, band))
                 crossing += cuts[0].length > 0
         self.assertGreaterEqual(crossing, 10, "fixture must put several bands across the seam")
+
+
+def _island(seam):
+    return shapely.box(seam - 70, 106 * 4096 + 2000, seam + 50, 106 * 4096 + 2110)
 
 
 def _synthetic_two_cells(root, seam, bump=None):
@@ -460,27 +391,7 @@ def _synthetic_two_cells(root, seam, bump=None):
     depth rises northward with a wobble, so bands and the offshore hole cross the seam.
     With bump=(columns, rows): a 10 m sea instead, with one 40 m block of GEBCO nodes at
     29.3 N whose columns are split evenly around the first node east of the seam."""
-    island = shapely.box(seam - 70, 106 * 4096 + 2000, seam + 50, 106 * 4096 + 2110)
-    tiles = {}
-    for tx in range(214 * 16 - 2, 216 * 16 + 2):
-        for ty in range(106 * 16 - 2, 107 * 16 + 2):
-            local = shapely.affinity.affine_transform(island, [16, 0, 0, 16, -tx * 4096, -ty * 4096])
-            if local.intersects(shapely.box(-64, -64, 4160, 4160)):
-                layer = [{"name": "earth", "features": [{"geometry": local, "properties": {"kind": "earth"}}]}]
-                tiles[zxy_to_tileid(12, tx, ty)] = gzip.compress(
-                    mvt.encode(layer, default_options={"y_coord_down": True}), mtime=0)
-    meta = {"version": "4.15.2", "planetiler:osm:osmosisreplicationtime": "synthetic",
-            "planetiler:githash": "synthetic"}
-    protomaps = root / "protomaps.pmtiles"
-    lp.write_pmtiles(protomaps, tiles, meta, lp.cell_bounds(214, 106), 12, 12)
-    peak = mvt.encode([{"name": "pois", "features": [
-        {"geometry": shapely.Point(10, 10), "properties": {"kind": "peak", "elevation": 5}}]}],
-        default_options={"y_coord_down": True})
-    raw = root / "raw-peaks.pmtiles"
-    lp.write_pmtiles(raw, {zxy_to_tileid(13, 214 * 32, 106 * 32): gzip.compress(peak, mtime=0)}, meta,
-                     lp.cell_bounds(214, 106), 13, 13)
-    peaks = root / "peaks.pmtiles"
-    lp.make_peaks([raw], peaks, log=lambda *_: None)
+    index = land_index(root, [_island(seam)])
     lat = (np.arange(int((28.2 + 90) * 240), int((29.7 + 90) * 240)) + 0.5) / 240 - 90
     lon = (np.arange(int((120.7 + 180) * 240), int((122.5 + 180) * 240)) + 0.5) / 240 - 180
     la, lo = np.meshgrid(lat, lon, indexing="ij")
@@ -488,7 +399,7 @@ def _synthetic_two_cells(root, seam, bump=None):
     if bump:
         columns, rows = bump
         depth = np.full(la.shape, 10.0)
-        j, i = np.searchsorted(lon, float(lp.lon_of_px(seam))), np.searchsorted(lat, 29.3)
+        j, i = np.searchsorted(lon, float(dp.lon_of_px(seam))), np.searchsorted(lat, 29.3)
         depth[i:i + rows, j - columns // 2:j + columns // 2] = 40.0
     gebco = root / "gebco.nc"
     ds = netCDF4.Dataset(gebco, "w")
@@ -498,7 +409,7 @@ def _synthetic_two_cells(root, seam, bump=None):
     ds.createVariable("lon", "f8", ("lon",))[:] = lon
     ds.createVariable("elevation", "i2", ("lat", "lon"))[:] = np.round(-depth).astype(np.int16)
     ds.close()
-    return protomaps, peaks, gebco
+    return index, gebco
 
 
 if __name__ == "__main__":

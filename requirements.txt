@@ -1,6 +1,6 @@
 shapely==2.0.6 --hash=sha256:83b94a44ab04a90e88be69e7ddcc6f332da7c0a0ebb1156e1c4f568bbec983c3
 numpy==2.5.3 --hash=sha256:f59a878c33d6b88122d80d239bb3b845d58708750b0cb06a09aebb9b18ec696c
-# land_product.py / audit_land.py (macOS arm64 wheels, CPython 3.12)
+# depth_product.py, seamap_product.py and tests (macOS arm64 wheels, CPython 3.12)
 scipy==1.18.1 --hash=sha256:7bbf207c4453ce1ad2e00b17313852b33310b83090c2311bdaf97f93c0380d12
 contourpy==1.4.0 --hash=sha256:c76f3a5318164db7d9401132fc1b5364b784c613c93fa506e3b5e6d1bf353ec8
 pillow==13.0.0 --hash=sha256:fc481f742ccda20e9ed760b8f978dff50f2a4e9bc253ac167fb0a05b0783ef52

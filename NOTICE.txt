@@ -1,65 +1,18 @@
-DingHai marine-background basemap / GSHHG product generator python-product-2
+DingHai Seamap overview and cells / seamap-cell-2
 
-GSHHG 2.3.7: Paul Wessel and Walter H. F. Smith.
-Official native binary source:
-https://www.soest.hawaii.edu/pwessel/gshhg/gshhg-bin-2.3.7.zip
-118617033 bytes; SHA-256:
-28600e8f7a08645aab43079326df6504212ec5ccb2b4bcf3b5f4f12ed60e82bc
-
-GSHHG is LGPL-3.0-or-later. This transformed resource uses version 3.
-The official permission/disclaimer notice and full GNU LGPLv3 and GPLv3
-texts are in Licenses/. Retain them with distribution.
-
-Marine Imagery's generation portions were modified on 2026-10-09:
-official native-binary parsing; five resolutions and three typed families;
-L5 ice-front land / L6 exclusion; original-path-only strokes; schema 2;
-bounded disk spool; input/member identities and independent release audit.
-Modified on 2026-10-10: marine-background cutover to five coast inputs only;
-remove river/border production and inland L2–4 strokes; retain all five LODs
-of land/lake fills, L1 sea/island outlines, L5 land conversion, L6 exclusion
-and original-path-only polar strokes without reducing retained precision.
-Metadata and independent audit now describe and enforce this reduced scope.
-The standalone generator, audit and tests are offered under LGPL-3.0-only.
-Projection, world splitting and encoding originate in the existing
-Marine Imagery Python producer; this is not the App's Clipper converter.
-
-Only this minimal generator/source package is offered for corresponding
-source. No private App, accounts, chart tools or repository history is
-included or licensed by this notice. Fixed build instructions and source
-input identity are in README.md. Offer equivalent access to this source
-package for the exact data version; do not rely on publishing the private
-repository. Payload and manifest are Cloudflare-only, with file entry point
-https://resources.dinghai.app/gshhg/manifest.json, which lists datasetVersion
-gshhg-2.3.7-python-product-2 and its payload URL. New-version corresponding
-source and licenses use only the independent minimal public GitHub repository
-https://github.com/jkqq147-team/dinghai-basemap-generator.
-Its fixed tag gshhg-2.3.7-python-product-2 (commit 51e1c2f) has a published
-release with gshhg-product-2.3.7-python-product-2-source.zip attached
-(SHA-256 159d67ddceb98133706d651a40968ff5d6a893d6c117b048c6adf4ee903d306f,
-the same as the manifest's correspondingSource).
-No App, whole Marine Imagery repository or basemap payload ZIP is published
-there. The NOTICE.txt inside that tag and source ZIP predates publication and
-still calls these links planned; it is left unchanged.
-The DingHai App reads that manifest; its existing legal notices link the
-installed dataset version's corresponding source, not the offline chart page
-or a resource HTML page. This tool does not make App changes, create a
-repository, push or upload. Do not add a new-version CF source fallback or
-remove existing v1 CF source.
-
-General geographic basemap only; not an ENC or navigation chart.
-No warranty, support or promise of suitability for navigation.
-
-----------------------------------------------------------------------
-DingHai Seamap land cells / land_product.py land-product-1
-
-Land layers (landuse, roads, peaks, places): © OpenStreetMap contributors
-· Protomaps. Derived from a Protomaps basemap build (OpenStreetMap data,
-https://www.openstreetmap.org/copyright), available under the Open Database
-License 1.0: https://opendatacommons.org/licenses/odbl/1-0/ — full text in
-Licenses/ODbL-1.0.txt (official plain text, opendatacommons.org, retrieved
-2026-10-25). This repository publishes the method used to derive the cells
-(ODbL 4.6); the Protomaps build, its version and SHA-256 are recorded in
-each release manifest and cell.
+The global overview (land, water) and every cell layer except depth
+(seamark, land, water, wetland, sea_area, landuse, roads, peaks, places)
+are compiled directly from one OpenStreetMap snapshot
+and OSM Data's land polygons (OpenStreetMap coastline processing):
+Copyright OpenStreetMap contributors, Open Database License 1.0
+(Licenses/ODbL-1.0.txt, official plain text, opendatacommons.org, retrieved
+2026-10-25; https://www.openstreetmap.org/copyright). This repository
+publishes the method used to derive the cells (ODbL 4.6); source URLs,
+dates, bytes and SHA-256 are recorded in each release manifest and cell. No
+third-party compiled Seamap or Protomaps archive, feature or attribution is
+read or included. Planetiler is an Apache-2.0 build dependency, not
+incorporated into the data; its pinned version and the custom LGPL-3.0-only
+schema are in planetiler/.
 
 Depth layer: GEBCO Bathymetric Compilation Group 2026 (2026). The
 GEBCO_2026 Grid - a continuous terrain model for oceans and land at 15
@@ -67,30 +20,14 @@ arc-second intervals. doi:10.5285/4f68d5c7-45eb-f999-e063-7086abc036fa.
 The GEBCO Grid is placed in the public domain; terms of use in
 Licenses/GEBCO-terms-of-use.txt (https://www.gebco.net/data-products/
 gridded-bathymetry/terms-of-use, retrieved 2026-10-25). No official status
-or GEBCO/IHO/IOC endorsement is implied.
+or GEBCO/IHO/IOC endorsement is implied. Its offshore distance uses the
+same OSM land polygons as the land layer.
 
 The depth bands are illustrative: interpolated from the GEBCO grid, not a
-survey, not for navigation (示意、非测量、不可用于导航).
+survey, not for navigation (示意、非测量、不可用于导航). These are general
+map data, not an ENC or navigation chart.
 
-The test fixtures tests/fixtures/protomaps-dachen*.pmtiles and
-tests/fixtures/gebco-dachen.nc are small extracts of the same sources under
-the same terms. land_product.py, audit_land.py, tests/test_land.py and
-tests/fixtures/make_land_fixtures.py are offered under LGPL-3.0-only.
-
-----------------------------------------------------------------------
-DingHai combined Seamap cells / seamap-cell-1
-
-The seamark, land, water, wetland and sea_area layers are derived directly
-from OpenStreetMap and OSM Data's land polygons: Copyright OpenStreetMap
-contributors, Open Database License 1.0 (Licenses/ODbL-1.0.txt,
-https://www.openstreetmap.org/copyright). No third-party compiled Seamap
-archive, feature or attribution is included. Planetiler is an Apache-2.0
-build dependency, not incorporated into the data; its pinned version and
-the custom LGPL-3.0-only schema are in planetiler/.
-
-seamap_product.py combines those layers with the ODbL Protomaps and GEBCO
-land-product-1 layers whose notices appear above. Source URLs, dates,
-bytes and SHA-256 are recorded per release. These are general map data,
-not an ENC or navigation chart; the illustrative-depth warning remains
-unchanged. compare_pilot.py is verification-only: it makes bounded memory
-Range reads and emits aggregate counts, never producer input or features.
+tests/fixtures/gebco-fractional.nc is a small GEBCO-format test grid, under
+the GEBCO terms above. depth_product.py, seamap_product.py, audit_seamap.py, land_subset.py,
+planetiler/ and tests/ are offered under LGPL-3.0-only; the GNU LGPLv3 and
+the GPLv3 it incorporates are in Licenses/LGPL-3.0.txt and Licenses/GPL-3.0.txt.
