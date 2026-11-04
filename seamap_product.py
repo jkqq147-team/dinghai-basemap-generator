@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: LGPL-3.0-only
-"""Cut the DingHai Seamap Planetiler archive into a global overview and z8 cells (seamap-cell-2).
+"""Cut the DingHai Seamap Planetiler archive into content-addressed overview and z8 cells (v3).
 
 The archive (planetiler/, one OSM snapshot + OSM land polygons + depth_product.py's
 GEBCO depth Shapefiles) holds land/water at z0-14, seamark/wetland/sea_area at z8-14
 and landuse/roads/peaks/places/depth at z8-12. Its z0-7 tiles become one overview
-PMTiles; every selected z8 cell gets one file with its z8-14 tiles and a bytes/SHA-256
-cells.json entry. Tiles are copied, never merged or re-encoded. No network or
+PMTiles; every selected z8 cell gets one object with its z8-14 tiles and a bytes/SHA-256
+entry in its z4 index shard. Tiles are copied, never merged or re-encoded. No network or
 third-party archive is read.
 """
 from __future__ import annotations
@@ -17,6 +17,7 @@ import hashlib
 import json
 import math
 import os
+import tempfile
 import threading
 import time
 from collections import OrderedDict, defaultdict
@@ -31,8 +32,8 @@ from pmtiles.writer import optimize_directories
 
 import depth_product
 
-VERSION = "seamap-cell-2"
-SCHEMA_VERSION = 2
+VERSION = "seamap-cell-3"
+SCHEMA_VERSION = 3
 GRID_ZOOM = 8
 MIN_ZOOM, MAX_ZOOM = 8, 14
 OSM_LAYERS = ("seamark", "land", "water", "wetland", "sea_area")
@@ -80,6 +81,15 @@ def cell_bounds(x, y):
 
 
 # ---------------------------------------------------------------- pmtiles
+
+def _gzip_header(data):
+    """Canonical gzip headers, including Python/zlib's platform-dependent OS byte."""
+    return data[:4] + b"\0" * 4 + data[8:9] + b"\xff" + data[10:]
+
+
+def _gzip(data):
+    return _gzip_header(gzip.compress(data, compresslevel=9, mtime=0))
+
 
 class Archive:
     """Read-only pmtiles v3 random access with os.pread and a bounded leaf cache (one per thread)."""
@@ -134,7 +144,7 @@ def write_pmtiles(path, tiles, metadata, bounds, min_zoom, max_zoom):
     bounds = (west, south, east, north) degrees."""
     entries, offsets, blobs, offset = [], {}, [], 0
     for tile_id in sorted(tiles):
-        data = tiles[tile_id]
+        data = _gzip_header(tiles[tile_id])
         if data in offsets:
             last = entries[-1]
             if last.offset == offsets[data] and last.tile_id + last.run_length == tile_id:
@@ -146,8 +156,16 @@ def write_pmtiles(path, tiles, metadata, bounds, min_zoom, max_zoom):
             entries.append(Entry(tile_id, offset, len(data), 1))
             blobs.append(data)
             offset += len(data)
-    root, leaves, _ = optimize_directories(entries, 16384 - 127)  # gzip-compressed by pmtiles
-    meta = gzip.compress(json.dumps(metadata, ensure_ascii=False, sort_keys=True).encode(), mtime=0)
+    root, leaves, _ = optimize_directories(entries, 16384 - 127)
+    # pmtiles compresses each leaf separately. Header-only normalization preserves
+    # compressed lengths and therefore all directory offsets.
+    leaves = bytearray(leaves)
+    for entry in deserialize_directory(root):
+        if entry.run_length == 0:
+            start, end = entry.offset, entry.offset + entry.length
+            leaves[start:end] = _gzip_header(leaves[start:end])
+    root = _gzip_header(root)
+    meta = _gzip(json.dumps(metadata, ensure_ascii=False, sort_keys=True).encode())
     west, south, east, north = bounds
     header = {
         "version": 3, "root_offset": 127, "root_length": len(root),
@@ -240,35 +258,31 @@ def _stats(tiles):
             stat["mvtBytes"] += len(layer)
             # Layer sizes are individually compressed MVT Layer messages, not additive PMTiles spans.
             message = b"\x1a" + _encode_varint(len(layer)) + layer
-            stat["gzipBytes"] += len(gzip.compress(message, compresslevel=9, mtime=0))
+            stat["gzipBytes"] += len(_gzip(message))
     return dict(sorted(layers.items()))
 
 
 # ---------------------------------------------------------------- cells
 
-def _metadata(cx, cy, release, identity):
+def _metadata(cx, cy, identity):
     depth = identity["depth"]
     return {
         "name": "DingHai Seamap cell", "format": "pbf", "type": "overlay", "attribution": ATTRIBUTION,
-        "dinghai:schemaVersion": SCHEMA_VERSION, "dinghai:release": release,
-        "dinghai:cell": f"{GRID_ZOOM}/{cx}/{cy}", "dinghai:generatorVersion": VERSION,
-        "dinghai:generatorSHA256": identity["generatorSHA256"],
+        "dinghai:schemaVersion": SCHEMA_VERSION,
+        "dinghai:cell": f"{GRID_ZOOM}/{cx}/{cy}",
         "dinghai:sourceRepository": SOURCE_REPOSITORY,
         "dinghai:osmAttribution": OSM_ATTRIBUTION,
         "dinghai:osmLicense": "ODbL-1.0", "dinghai:osmLicenseURL": OSM_LICENSE_URL,
         "dinghai:osmCopyrightURL": OSM_COPYRIGHT_URL,
-        "dinghai:osmPbf": identity["provenance"]["osm"],
-        "dinghai:landPolygons": identity["provenance"]["landPolygons"],
         "dinghai:depthAttribution": depth["gebco"]["attribution"], "dinghai:depthDOI": depth["gebco"]["doi"],
         "dinghai:depthTermsURL": depth["gebco"]["termsURL"], "dinghai:depthNotice": depth["notice"],
-        "dinghai:gebcoGrid": depth["gebco"]["grid"], "dinghai:gebcoSHA256": depth["gebco"]["sha256"],
-        "dinghai:depth": depth["params"],
+        "dinghai:gebcoGrid": depth["gebco"]["grid"],
         "vector_layers": [{"id": name, "fields": FIELDS[name], "minzoom": MIN_ZOOM,
                            "maxzoom": LAYER_MAX_ZOOM[name]} for name in LAYERS],
     }
 
 
-def build_cell(archive, output_path, cx, cy, release, identity):
+def build_cell(archive, output, cx, cy, identity):
     started = time.monotonic()
     raw_tiles = {}
     for z in range(MIN_ZOOM, MAX_ZOOM + 1):
@@ -278,17 +292,13 @@ def build_cell(archive, output_path, cx, cy, release, identity):
                 raw = archive.get(z, x, y)
                 if raw is not None:
                     raw_tiles[zxy_to_tileid(z, x, y)] = raw
-    tiles = {tile_id: gzip.compress(raw, compresslevel=9, mtime=0) for tile_id, raw in raw_tiles.items()}
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = output_path.with_name(f".{output_path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
-    write_pmtiles(temporary, tiles, _metadata(cx, cy, release, identity), cell_bounds(cx, cy), MIN_ZOOM, MAX_ZOOM)
-    os.replace(temporary, output_path)
-    data = output_path.read_bytes()
-    return {"x": cx, "y": cy, "bytes": len(data), "sha256": hashlib.sha256(data).hexdigest(),
+    tiles = {tile_id: _gzip(raw) for tile_id, raw in raw_tiles.items()}
+    obj = _write_object(output, tiles, _metadata(cx, cy, identity), cell_bounds(cx, cy), MIN_ZOOM, MAX_ZOOM)
+    return {"x": cx, "y": cy, **obj,
             "seconds": round(time.monotonic() - started, 3), "layers": _stats(raw_tiles)}
 
 
-def build_overview(archive, output, release, identity):
+def build_overview(archive, output):
     """The archive's z0-7 tiles (land and inland water) as one global PMTiles."""
     tiles = {}
     for z in range(OVERVIEW_MAX_ZOOM + 1):
@@ -296,39 +306,58 @@ def build_overview(archive, output, release, identity):
             for y in range(1 << z):
                 raw = archive.get(z, x, y)
                 if raw is not None:
-                    tiles[zxy_to_tileid(z, x, y)] = gzip.compress(raw, compresslevel=9, mtime=0)
+                    tiles[zxy_to_tileid(z, x, y)] = _gzip(raw)
     metadata = {
         "name": "DingHai Seamap overview", "format": "pbf", "type": "baselayer", "attribution": OSM_ATTRIBUTION,
-        "dinghai:schemaVersion": SCHEMA_VERSION, "dinghai:release": release, "dinghai:generatorVersion": VERSION,
-        "dinghai:generatorSHA256": identity["generatorSHA256"], "dinghai:sourceRepository": SOURCE_REPOSITORY,
+        "dinghai:schemaVersion": SCHEMA_VERSION, "dinghai:sourceRepository": SOURCE_REPOSITORY,
         "dinghai:osmLicense": "ODbL-1.0", "dinghai:osmLicenseURL": OSM_LICENSE_URL,
         "dinghai:osmCopyrightURL": OSM_COPYRIGHT_URL,
-        "dinghai:osmPbf": identity["provenance"]["osm"], "dinghai:landPolygons": identity["provenance"]["landPolygons"],
         "vector_layers": [{"id": name, "fields": {}, "minzoom": 0, "maxzoom": OVERVIEW_MAX_ZOOM}
                           for name in OVERVIEW_LAYERS],
     }
-    path = Path(output) / "releases" / release / "overview.pmtiles"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
-    write_pmtiles(temporary, tiles, metadata, (-180.0, -85.0511287798066, 180.0, 85.0511287798066),
-                  0, OVERVIEW_MAX_ZOOM)
-    os.replace(temporary, path)
-    data = path.read_bytes()
-    return {"url": f"releases/{release}/overview.pmtiles", "bytes": len(data),
-            "sha256": hashlib.sha256(data).hexdigest(), "minimumZoom": 0, "maximumZoom": OVERVIEW_MAX_ZOOM,
-            "layers": list(OVERVIEW_LAYERS)}
+    return _write_object(output, tiles, metadata, (-180.0, -85.0511287798066, 180.0, 85.0511287798066),
+                         0, OVERVIEW_MAX_ZOOM)
 
 
-def cell_path(output, release, x, y):
-    return Path(output) / "releases" / release / "cells" / str(GRID_ZOOM) / str(x) / f"{y}.pmtiles"
+def object_path(output, sha256):
+    return Path(output) / "objects" / f"{sha256}.pmtiles"
 
 
-def _atomic_write(path, data):
+def _install_immutable(temporary, path):
+    """Publish a complete file without replacing any existing immutable object."""
+    try:
+        os.link(temporary, path)
+    except FileExistsError:
+        if path.read_bytes() != temporary.read_bytes():
+            raise ValueError(f"immutable file differs: {path}")
+
+
+def _write_object(output, tiles, metadata, bounds, min_zoom, max_zoom):
+    directory = Path(output) / "objects"
+    directory.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(dir=directory, prefix=".", suffix=".tmp") as temporary:
+        path = Path(temporary.name)
+        write_pmtiles(path, tiles, metadata, bounds, min_zoom, max_zoom)
+        data = path.read_bytes()
+        digest = hashlib.sha256(data).hexdigest()
+        _install_immutable(path, object_path(output, digest))
+    return {"sha256": digest, "bytes": len(data)}
+
+
+def _atomic_write(path, data, *, immutable=False):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
-    temporary.write_bytes(data)
-    os.replace(temporary, path)
+    fd, name = tempfile.mkstemp(dir=path.parent, prefix=".", suffix=".tmp")
+    temporary = Path(name)
+    try:
+        with os.fdopen(fd, "wb") as stream:
+            stream.write(data)
+        if immutable:
+            _install_immutable(temporary, path)
+        else:
+            os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def _identity(archive_path, provenance_path, depth_dir):
@@ -350,42 +379,64 @@ def build(archive_path, provenance, depth_dir, release, cells, output, state_dir
     identity = _identity(archive_path, provenance, depth_dir)
     identity_hash = hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
     local = threading.local()
+    archives = []
 
     def one(cell):
         x, y = cell
         state = state_dir / "cells" / f"{x}-{y}.json"
         if state.exists():
             record = json.loads(state.read_text())
-            if record["identity"] == identity_hash and cell_path(output, release, x, y).is_file():
+            if record["identity"] == identity_hash and object_path(output, record["entry"]["sha256"]).is_file():
                 return record["entry"], record["seconds"]
         if not hasattr(local, "archive"):
             local.archive = Archive(archive_path)
-        result = build_cell(local.archive, cell_path(output, release, x, y), x, y, release, identity)
+            archives.append(local.archive)
+        result = build_cell(local.archive, output, x, y, identity)
         seconds = result.pop("seconds")
         _atomic_write(state, json.dumps({"identity": identity_hash, "entry": result, "seconds": seconds},
                                         separators=(",", ":")).encode())
         return result, seconds
 
-    overview = build_overview(Archive(archive_path), output, release, identity)
+    overview_archive = Archive(archive_path)
+    try:
+        overview = build_overview(overview_archive, output)
+    finally:
+        os.close(overview_archive.fd)
     print(json.dumps({"overview": overview}), flush=True)
     results = []
-    with ThreadPoolExecutor(max_workers=jobs) as pool:
-        for entry, seconds in pool.map(one, cells):
-            results.append(entry)
-            print(json.dumps({**entry, "seconds": seconds}, ensure_ascii=False, separators=(",", ":")), flush=True)
+    try:
+        with ThreadPoolExecutor(max_workers=jobs) as pool:
+            for entry, seconds in pool.map(one, cells):
+                results.append(entry)
+                print(json.dumps({**entry, "seconds": seconds}, ensure_ascii=False, separators=(",", ":")), flush=True)
+    finally:
+        for archive in archives:
+            os.close(archive.fd)
     return finalize(output, release, results, identity, overview)
 
 
 def finalize(output, release, entries, identity, overview):
     output = Path(output)
-    entries.sort(key=lambda entry: (entry["x"], entry["y"]))
-    cells_json = json.dumps(entries, ensure_ascii=False, separators=(",", ":")).encode()
-    release_root = output / "releases" / release
-    _atomic_write(release_root / "cells.json", cells_json)
-    expected = {Path(str(entry["x"])) / f"{entry['y']}.pmtiles" for entry in entries}
-    actual = {path.relative_to(release_root / "cells" / "8") for path in (release_root / "cells" / "8").glob("*/*.pmtiles")}
-    if actual != expected:
-        raise ValueError(f"cell files and selection differ: {sorted(map(str, actual ^ expected))[:5]}")
+    if not release or release in (".", "..") or "/" in release or "\\" in release:
+        raise ValueError("release must be a single filename component")
+    shards = defaultdict(list)
+    seen = set()
+    for entry in sorted(entries, key=lambda entry: (entry["x"], entry["y"])):
+        x, y = entry["x"], entry["y"]
+        if not (0 <= x < 256 and 0 <= y < 256) or (x, y) in seen:
+            raise ValueError(f"invalid or duplicate cell: {x}/{y}")
+        seen.add((x, y))
+        shards[f"{x >> 4}/{y >> 4}"].append([x, y, entry["bytes"], entry["sha256"]])
+    for entry in [overview, *entries]:
+        path = object_path(output, entry["sha256"])
+        if path.stat().st_size != entry["bytes"]:
+            raise ValueError(f"object size differs: {path}")
+    index = {}
+    for parent, rows in sorted(shards.items()):
+        payload = json.dumps(rows, separators=(",", ":")).encode()
+        digest = hashlib.sha256(payload).hexdigest()
+        _atomic_write(output / "index" / f"{digest}.json", payload, immutable=True)
+        index[parent] = digest
     depth = identity["depth"]
     sources = dict(identity["provenance"])
     sources["gebco"] = {key: depth["gebco"][key] for key in ("grid", "doi", "bytes", "sha256", "coverage")}
@@ -399,12 +450,12 @@ def finalize(output, release, entries, identity, overview):
         "licences": {"osm": "ODbL-1.0", "gebco": "GEBCO terms of use"},
         "generatorIdentity": f"seamap_product.py:{VERSION}:sha256:{identity['generatorSHA256']}",
         "depthGeneratorIdentity": f"depth_product.py:{depth['generatorVersion']}:sha256:{depth['generatorSHA256']}",
-        "cellsURL": f"releases/{release}/cells/{{z}}/{{x}}/{{y}}.pmtiles",
-        "cells": f"releases/{release}/cells.json", "cellsBytes": len(cells_json),
-        "cellsSHA256": hashlib.sha256(cells_json).hexdigest(), "cellCount": len(entries),
+        "index": index, "record": f"releases/{release}.json", "cellCount": len(entries),
         "totalBytes": sum(entry["bytes"] for entry in entries), "overview": overview,
     }
-    _atomic_write(output / "manifest.json", json.dumps(manifest, ensure_ascii=False, indent=1).encode())
+    payload = json.dumps(manifest, ensure_ascii=False, indent=1).encode()
+    _atomic_write(output / manifest["record"], payload, immutable=True)
+    _atomic_write(output / "manifest.json", payload)
     return manifest
 
 

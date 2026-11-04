@@ -1,7 +1,7 @@
 # DingHai basemap generator
 
 This repository holds DingHai's development-side offline basemap producer,
-**seamap-cell-2**. It does not run in the App. One Planetiler compile of one
+**seamap-cell-3**. It does not run in the App. One Planetiler compile of one
 OpenStreetMap snapshot yields, as standard PMTiles (one gzip per tile, no
 DingHai-specific format):
 
@@ -17,9 +17,10 @@ land_polygons.shp ─┬──────────────────�
                    └ depth_product.py index → land-index.sqlite │ planetiler/ SeamapCompiler
 GEBCO_2026.nc ─────── depth_product.py build ─── depth/x*.shp ──┘ → seamap.pmtiles, z0–14
                         (offshore distance to the same land polygons)
-seamap.pmtiles ─ seamap_product.py ─┬─ releases/<release>/overview.pmtiles        z0–7
-                                    ├─ releases/<release>/cells/8/{x}/{y}.pmtiles  z8–14 ×65,536
-                                    └─ releases/<release>/cells.json, manifest.json
+seamap.pmtiles ─ seamap_product.py ─┬─ objects/<sha256>.pmtiles   overview z0–7 / cells z8–14
+                                  ├─ index/<sha256>.json       z8 cells grouped by z4 parent
+                                  ├─ releases/<release>.json  immutable provenance record
+                                  └─ manifest.json            only mutable publication pointer
 ```
 
 No Protomaps build, no per-cell merge of a second product and no third-party
@@ -33,7 +34,7 @@ the cells' land layers the second.
 | --- | --- |
 | `planetiler/` | `SeamapCompiler.java`, the only layer rules; Planetiler pinned in `pom.xml` |
 | `depth_product.py` | land-polygon index and GEBCO depth bands, an input of the compile |
-| `seamap_product.py` | cuts the compiled archive into overview and cells; `cells.json`, `manifest.json` |
+| `seamap_product.py` | cuts the compiled archive into immutable objects, index shards and release records; `manifest.json` |
 | `audit_seamap.py` | stdlib-only structural audit of a release |
 | `land_subset.py` | pilots only: selects whole land polygons around pilot boxes |
 
@@ -49,9 +50,9 @@ names, which the App shows only from z8 in cells.
 | `land` | OSM land polygons, simplified per zoom (0.25 px) | land fill; its own edges are the coastline and island outlines (tile-clipped edges fall in the tile buffer, as for cells) |
 | `water` | the cell `water` rule without river polygons (`waterway=riverbank`, `water=river/canal/stream/ditch/drain/oxbow`), no fields, under 2 px dropped per zoom | lake and reservoir fill, drawn in the sea colour and not stroked, like GSHHG's even levels |
 
-Cells keep seamap-cell-1's App contract unchanged: the same ten layer names,
-fields, per-layer zoom ranges (`vector_layers`), file layout and `cells.json`
-format.
+Cells retain the ten layer names, fields and per-layer zoom ranges
+(`vector_layers`). Publication uses schemaVersion 3 and content addresses,
+independent of the release label.
 
 | Cell layer | Zooms | OSM rule (this repository's own) | Fields |
 | --- | --- | --- | --- |
@@ -188,11 +189,19 @@ and the land polygons (`land_subset.py land_polygons.shp pilot/land_polygons.shp
 --bbox W,S,E,N …`), build depth only for the pilot cells (`--cell X/Y`), and
 slice with `--cell X/Y`. The overview of a pilot covers only its region.
 
-`seamap_product.py` resumes cells by input/generator identity, rewrites the
-overview every run, and writes `cells.json` and `manifest.json` only after every
-selected cell succeeds. `cells.json` entries carry `bytes`/`sha256` and
-per-layer statistics (`mvtBytes` uncompressed, `gzipBytes` per layer for
-diagnosis only); worker `seconds` stay in the resume state.
+`seamap_product.py` resumes a cell only when the global input/generator identity
+matches and its content-addressed object exists. It rebuilds the overview every
+run, reusing an identical object without overwriting it. No additional cache is
+used. Keep `--state-dir` separate from the publication output: per-layer statistics
+(`mvtBytes` uncompressed, `gzipBytes` per layer for diagnosis only) and worker
+`seconds` stay in that state and the generator's JSON-line stdout, not in the
+published index. `audit_seamap.py` derives its own feature counts from the tiles.
+
+Only after every selected cell succeeds does finalize publish the shards and an
+immutable release record, then atomically replace `manifest.json`. Repeating an
+identical release is safe; trying to reuse its name with different manifest bytes
+fails without moving the pointer. Start v3 in a fresh output directory. Existing
+objects and shards may be shared by multiple releases and are never pruned here.
 
 ### Pilot against seamap-cell-1 (2026-11-03)
 
@@ -257,33 +266,55 @@ free** besides the inputs.
 ## Output contract
 
 ```text
-out/manifest.json
-out/releases/<release>/overview.pmtiles                 z0–7, land / water
-out/releases/<release>/cells.json                       [{"x","y","bytes","sha256","layers"}, …]
-out/releases/<release>/cells/8/{x}/{y}.pmtiles          z8–14, every selected cell
+out/manifest.json                      schemaVersion 3, only mutable object
+out/releases/<release>.json            byte-for-byte copy of that release's manifest
+out/index/<sha256>.json                compact [[x,y,bytes,"sha256"],…], sorted by (x,y)
+out/objects/<sha256>.pmtiles           cell or overview; filename hashes the file bytes
 ```
 
-`manifest.json`: `id` `dinghai-seamap`, `schemaVersion` 2, `gridZoom` 8,
-`minimumZoom` 8, `maximumZoom` 14, `layers`, `cellsURL`, `cells`,
-`cellsBytes`, `cellsSHA256`, `cellCount`, `totalBytes` (as seamap-cell-1),
-plus `overview` = `{"url", "bytes", "sha256", "minimumZoom": 0,
-"maximumZoom": 7, "layers": ["land", "water"]}`, `sources` (OSM, land
-polygons, GEBCO, compiled archive), `depth` parameters and notice, licences,
-`generatorIdentity` and `depthGeneratorIdentity`. Every cell's metadata
-repeats licence, attribution, GEBCO DOI, depth notice and source identities;
-an empty cell still gets a file and entry.
+`manifest.json` keeps `id: dinghai-seamap`, `release`, `gridZoom: 8`,
+`minimumZoom: 8`, `maximumZoom: 14`, `layers`, `sources` (OSM, land polygons,
+GEBCO, compiled archive), attribution, depth parameters and notice, licences,
+`generatorIdentity` and `depthGeneratorIdentity`. Its publication references are:
 
-`audit_seamap.py` checks hashes and sizes, inventory, overview zooms and
-layers, cell tile placement, layers and zooms, and metadata. It does not
-establish complete or navigation-grade geography.
+- `overview: {"sha256": "…", "bytes": N}` for the z0–7 land/water object;
+- `index: {"<x4>/<y4>": "<sha256>", …}`, one shard per populated z4 parent;
+- `record: "releases/<release>.json"` for immutable source tracing;
+- `cellCount` and `totalBytes` (cell objects only, excluding overview/index).
+
+For example, Hong Kong cell `8/209/111` belongs to parent `13/6`:
+
+```text
+manifest.index["13/6"] → index/<shard-sha>.json
+                       → row [209,111,bytes,"<cell-sha>"]
+                       → objects/<cell-sha>.pmtiles
+manifest.record        → releases/20261103.json (same manifest bytes, immutable)
+```
+
+There is no global cell-inventory JSON or diagnostic layer statistics in the
+publication. Even an empty selected cell gets a PMTiles object and an index row.
+Object metadata retains stable schema, cell coordinates, attribution, licences,
+GEBCO DOI and the illustrative-depth warning, but no release, source snapshot
+URL/date/hash/bytes, generator identity or depth-generation parameters. These
+belong in the manifest and its immutable release record. Every gzip member
+(tiles, metadata, root and leaf directories) has mtime 0 and OS byte 255.
+Index JSON uses fixed compact separators and sorted rows before hashing.
+
+`audit_seamap.py` checks object and shard hashes/sizes, parent placement and
+ordering, manifest totals and release-record equality, overview zooms/layers,
+cell tile placement, layers/zooms and stable metadata. Extra immutable objects
+from other releases are allowed. It does not establish complete or
+navigation-grade geography.
 
 ## App integration boundary
 
-The cells keep the schema-2 contract of seamap-cell-1, so the App's per-cell
-package switch needs no change for them. Replacing the GSHHG background with
-the overview (`overview` in the manifest; layers above) and updating the App's
-attribution text, which still names Protomaps, belong to App lanes. This
-repository makes no App change, upload or deployment.
+The App must consume schemaVersion 3 directly: fetch only the selected cells'
+z4 index shards, download objects by hash, and compare installed hashes with the
+current manifest/index hashes to decide whether an update exists. Release labels
+are provenance, not update identities. The server should serve `manifest.json`
+with `no-cache`; objects, shards and release records are immutable. Client
+integration and publication scripts belong to other lanes; this repository makes
+no App change, upload or deployment and provides no legacy-format output path.
 
 ## Licences
 

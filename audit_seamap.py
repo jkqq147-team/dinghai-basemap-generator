@@ -126,23 +126,42 @@ def layer_counts(tile):
 
 def audit(root):
     root = Path(root)
-    manifest = json.loads((root / "manifest.json").read_text())
-    if (manifest["id"], manifest["schemaVersion"], manifest["gridZoom"]) != ("dinghai-seamap", 2, 8):
+    manifest_bytes = (root / "manifest.json").read_bytes()
+    manifest = json.loads(manifest_bytes)
+    if (manifest["id"], manifest["schemaVersion"], manifest["gridZoom"]) != ("dinghai-seamap", 3, 8):
         raise ValueError("wrong product identity or grid")
     if set(manifest["layers"]) != LAYERS or (manifest["minimumZoom"], manifest["maximumZoom"]) != (8, 14):
         raise ValueError("wrong layer or zoom contract")
-    cells_path = root / manifest["cells"]
-    entries = json.loads(cells_path.read_text())
-    cells_bytes = cells_path.read_bytes()
-    if (len(cells_bytes), hashlib.sha256(cells_bytes).hexdigest()) != (manifest["cellsBytes"], manifest["cellsSHA256"]):
-        raise ValueError("cells.json digest differs")
+    if {"cells", "cellsURL", "cellsBytes", "cellsSHA256"} & manifest.keys():
+        raise ValueError("obsolete cell inventory in manifest")
+    if manifest["record"] != f"releases/{manifest['release']}.json":
+        raise ValueError("wrong release record path")
+    if (root / manifest["record"]).read_bytes() != manifest_bytes:
+        raise ValueError("release record differs from manifest")
+    entries = []
+    for parent, digest in manifest["index"].items():
+        data = (root / "index" / f"{digest}.json").read_bytes()
+        if hashlib.sha256(data).hexdigest() != digest:
+            raise ValueError(f"index digest differs: {parent}")
+        rows = json.loads(data)
+        if not rows or data != json.dumps(rows, separators=(",", ":")).encode():
+            raise ValueError(f"empty or noncompact index: {parent}")
+        coordinates = []
+        for x, y, size, sha in rows:
+            if not (0 <= x < 256 and 0 <= y < 256) or parent != f"{x >> 4}/{y >> 4}":
+                raise ValueError(f"cell {x}/{y} outside parent {parent}")
+            coordinates.append((x, y))
+            entries.append({"x": x, "y": y, "bytes": size, "sha256": sha})
+        if coordinates != sorted(set(coordinates)):
+            raise ValueError(f"unsorted or duplicate index: {parent}")
     if len(entries) != manifest["cellCount"] or sum(e["bytes"] for e in entries) != manifest["totalBytes"]:
         raise ValueError("manifest totals differ")
     overview = manifest["overview"]
-    overview_data = (root / overview["url"]).read_bytes()
+    overview_data = (root / "objects" / f"{overview['sha256']}.pmtiles").read_bytes()
     if (len(overview_data), hashlib.sha256(overview_data).hexdigest()) != (overview["bytes"], overview["sha256"]):
         raise ValueError("overview bytes or sha256 differs")
-    header, _, overview_tiles = read_pmtiles(overview_data)
+    header, metadata, overview_tiles = read_pmtiles(overview_data)
+    _check_metadata(metadata)
     if (header["min_zoom"], header["max_zoom"]) != (0, 7):
         raise ValueError("overview must be z0-7")
     for tile_id, body in overview_tiles.items():
@@ -151,15 +170,15 @@ def audit(root):
         if z > 7 or not names <= OVERVIEW_LAYERS:
             raise ValueError(f"overview has {sorted(names)} at z{z}")
     reports = []
-    expected = set()
     for entry in entries:
-        path = root / f"releases/{manifest['release']}/cells/8/{entry['x']}/{entry['y']}.pmtiles"
-        expected.add(path)
+        path = root / "objects" / f"{entry['sha256']}.pmtiles"
         data = path.read_bytes()
         if (len(data), hashlib.sha256(data).hexdigest()) != (entry["bytes"], entry["sha256"]):
             raise ValueError(f"{path}: bytes or sha256 differs")
         header, metadata, tiles = read_pmtiles(data)
-        if (header["min_zoom"], header["max_zoom"]) != (8, 14) or metadata["dinghai:schemaVersion"] != 2:
+        _check_metadata(metadata)
+        if ((header["min_zoom"], header["max_zoom"]) != (8, 14)
+                or metadata["dinghai:cell"] != f"8/{entry['x']}/{entry['y']}"):
             raise ValueError(f"{path}: wrong header or metadata")
         if "Open Waters" in json.dumps(metadata):
             raise ValueError(f"{path}: third-party attribution leaked")
@@ -173,12 +192,14 @@ def audit(root):
                     raise ValueError(f"{path}: unexpected layer {name} at z{z}")
                 counts[name] = counts.get(name, 0) + count
         reports.append({"x": entry["x"], "y": entry["y"], "bytes": len(data), "tiles": len(tiles), "features": counts})
-    root_cells = root / f"releases/{manifest['release']}/cells/8"
-    actual = set(root_cells.glob("*/*.pmtiles"))
-    if actual != expected:
-        raise ValueError(f"disk and cells.json differ: {sorted(map(str, actual ^ expected))[:5]}")
     return {"cellCount": len(entries), "totalBytes": sum(e["bytes"] for e in entries),
             "overview": {"bytes": len(overview_data), "tiles": len(overview_tiles)}, "cells": reports}
+
+
+def _check_metadata(metadata):
+    volatile = {"release", "osmPbf", "landPolygons", "generatorSHA256", "generatorVersion", "gebcoSHA256", "depth"}
+    if metadata["dinghai:schemaVersion"] != 3 or any(f"dinghai:{key}" in metadata for key in volatile):
+        raise ValueError("wrong schema or release-dependent PMTiles metadata")
 
 
 if __name__ == "__main__":
