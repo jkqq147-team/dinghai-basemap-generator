@@ -316,9 +316,137 @@ with `no-cache`; objects, shards and release records are immutable. Client
 integration and publication scripts belong to other lanes; this repository makes
 no App change, upload or deployment and provides no legacy-format output path.
 
+## Coastal satellite (local generation only)
+
+`satellite_product.py` makes **dinghai-satellite**, a separate raster product.
+It uses the official VersaTiles **5.7.0** CLI to remotely cut the published
+`https://download.versatiles.org/satellite.versatiles` by bbox. It never downloads
+the whole container. The publisher's release-asset SHA-256 verifies the CLI
+distribution, and the executable must match that archive. Satellite currently
+has no dated URL in the publisher's satellite URL list: the strong HTTP ETag
+and full container byte length identify the snapshot in the estimate, every
+cell's metadata, and the immutable release record.
+
+Selection uses the same full-resolution `depth_product.py` land index and
+the App's XYZ z8 grid. Compute each cell's land fraction from polygon unions
+(not a raster, so tiny islands count). Starting at the full-water central
+Pacific cell `8/21/128`, flood through cells with land fraction below one,
+using **eight neighbours**, wrapping x at the date line but never wrapping y.
+Keep reached cells whose land fraction is above zero. This is deliberately
+**cell-level connectivity**, not a test of whether individual water polygons
+connect: an adjacent lagoon can be included. Enclosed inland water separated
+from the ocean by wholly dry cells is excluded. The estimate records selection
+results for Caspian `8/163/95`, Hong Kong `8/209/111`, and Kiel `8/135/81`.
+
+```text
+land-index.sqlite → polygon land fractions → z8 ocean flood → coastal cells
+remote VersaTiles header + Brotli indexes ──────────────────┘
+    → estimate.json (tile counts/lengths; 300 GB gate)
+    → official CLI bbox cuts, z8–13 → transient MBTiles (TMS)
+    → byte-preserving WebP PMTiles (XYZ), one object per cell
+    → v3 shards + local cell release record
+same pinned source → satellite_overview.py → global z0–6 WebP PMTiles
+    → add manifest.overview and replace the unpublished local release record
+```
+
+Only actually stored tiles at z8–13 are copied: gaps and regional maximum
+zooms remain gaps, with no generated levels, resampling or image re-encoding.
+Images remain 512×512 WebP. In particular, the Hong Kong source has no z13
+tiles. Metadata explicitly carries
+`VersaTiles sources (https://versatiles.org/sources/)` and the source version.
+The source's component attribution/licences are available at that URL.
+
+The estimate uses **only** the coastal list and container indexes, not image
+downloads. It sums all addressed tile lengths without a deduplication discount,
+then reserves 40 bytes per tile and 64 KiB per cell for PMTiles and publication
+overhead. If that conservative estimate exceeds **300,000,000,000 bytes**, stop;
+the build command also refuses it. Cached indexes are scoped to the ETag.
+The official CLI reads through a loopback range endpoint: every origin request
+uses `If-Match`, verifies the returned ETag/range, and shares a four-request
+semaphore. No remote write is performed. At most four cells run concurrently.
+
+Example (the CLI archive and binary must first be downloaded from its official
+GitHub v5.7.0 release; these commands do not install or execute an unverified
+binary):
+
+```sh
+WORK=/tmp/dh-sat-prod
+RELEASE=YYYYMMDD
+PY=.venv/bin/python
+$PY -m pip install --require-hashes -r requirements.txt
+$PY satellite_product.py verify-cli \
+  --archive /tmp/versatiles-macos-aarch64.tar.gz --cli /tmp/versatiles \
+  --output "$WORK/cli-verification.json"
+$PY satellite_product.py estimate --land-index land-index.sqlite \
+  --cache "$WORK/index-cache" --output "$WORK/estimate.json"
+# Inspect withinBudget before proceeding; a false value means stop and report.
+$PY satellite_product.py build --estimate "$WORK/estimate.json" \
+  --cli /tmp/versatiles --cli-verification "$WORK/cli-verification.json" \
+  --release "$RELEASE" --output "$WORK/$RELEASE/out-v3" \
+  --state "$WORK/$RELEASE/state" --cache "$WORK/index-cache" --jobs 4
+$PY satellite_overview.py "$WORK/$RELEASE/out-v3" \
+  --estimate "$WORK/estimate.json" --cli /tmp/versatiles \
+  --cli-verification "$WORK/cli-verification.json" \
+  --state "$WORK/$RELEASE/state" --cache "$WORK/index-cache" \
+  --replace-unpublished-record
+$PY audit_satellite.py "$WORK/$RELEASE/out-v3" \
+  --estimate "$WORK/estimate.json" --output "$WORK/$RELEASE/audit.json"
+$PY satellite_mosaics.py "$WORK/$RELEASE/out-v3" \
+  --audit "$WORK/$RELEASE/audit.json" --output "$WORK"
+```
+
+The output root is the future **`satellite/`** publication prefix; it contains
+`manifest.json`, `index/<sha256>.json`, `objects/<sha256>.pmtiles` and
+`releases/<release>.json`. Like Seamap, the schemaVersion 3
+index is compact `[[x,y,bytes,"sha256"],…]`, sorted and sharded by z4 parent.
+For example, Hong Kong uses `manifest.index["13/6"]`. `cellCount` and
+`totalBytes` describe cell objects; the manifest also declares `tileType: webp`,
+`tileSize: 512`, `minimumZoom: 8`, and `maximumZoom: 13`.
+
+The top-level `overview: {"sha256": "...", "bytes": N}` references the global
+**z0–6** object in the same objects directory. z7 is displayed by the App using
+z6; the producer does not synthesize z7. The source index for this snapshot has
+**5,461 tiles**, not the initial estimate's 21,461 (z0–6 can have at most
+1 + 4 + … + 4096 = 5,461 XYZ tiles). The resulting PMTiles is **90,528,164
+bytes**. Every overview tile is copied without re-encoding from the same
+ETag-pinned source using the same verified CLI. Overview index counts and
+payload lengths are recorded in `state/overview-estimate.json`.
+
+Keep the state directory outside the output. Completed cells resume only under
+the same generator, estimate, CLI and source identity, and after rechecking
+their object's SHA-256. A partial cell is re-extracted. Transient MBTiles are
+deleted after their PMTiles object and receipt are installed. Finalization
+occurs only after all cells succeed and the remote version is checked again.
+For long runs, launch the build in an independent session with output appended
+to a durable log, rather than tying it to an interactive agent runner.
+
+The overview is deliberately a separate second command, run **after all cells
+finish**. Do not change `satellite_product.py`, `seamap_product.py`,
+`depth_product.py` or `requirements.txt` while resuming this run: their combined
+hash is the cell identity. `satellite_overview.py` is outside that identity and
+records its own `overviewGeneratorIdentity`. It preserves all cell objects,
+shards, receipts and the cell identity. The explicit
+`--replace-unpublished-record` flag authorizes replacement of the **local,
+not-yet-uploaded** release record under the same release name when adding the
+overview; the manifest is then replaced with those same bytes. Do not use this
+command on an already published release. This local assembly step is not an
+upload or a mutable-record contract for R2.
+
+`audit_satellite.py` verifies hashes, sizes, shard order/parent placement,
+release-record equality, manifest totals, metadata, tile coordinates, actual
+zooms and nonzero tile counts. It decodes **every image** to verify readable
+512×512 WebP. With `--estimate`, the selected cell inventory and each zoom's
+tile count/payload bytes must also match the source index. It does not establish
+imagery age, optical resolution, navigation suitability or App rendering.
+The audit also checks the overview SHA-256 and byte size, global bounds,
+attribution/source metadata, actual presence of every zoom z0–6 (and no other
+zoom), and decodes every overview image.
+All product files and diagnostics stay outside Git. Uploading to R2 and
+switching its manifest are explicitly a separate Main-owned operation.
+
 ## Licences
 
-All layers except depth, and the whole overview, are derived from
+All Seamap layers except depth, and the whole Seamap overview, are derived from
 OpenStreetMap and OSM Data's land polygons, © OpenStreetMap contributors,
 **Open Database License 1.0** (`Licenses/ODbL-1.0.txt`); this repository is the
 public description of the derivation (ODbL 4.6). The depth layer is derived

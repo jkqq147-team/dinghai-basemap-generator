@@ -13,3 +13,5 @@ protobuf==6.33.6 --hash=sha256:9720e6961b251bde64edfdab7d500725a2af5280f3f4c87e5
 pyclipper==1.4.0 --hash=sha256:222ac96c8b8281b53d695b9c4fedc674f56d6d4320ad23f1bdbd168f4e316140
 pmtiles==3.8.1 --hash=sha256:718561bb21f8c7dd5464fdcc3b9ad0e7b1c917be60ddfdf9a5ab56b8c67f7bde
 pyshp==3.0.3 --hash=sha256:28c8fac8c0c25bb0fecbbfd10ead7f319c2ff2f3b0b44a94f22bd2c93510ad42
+# satellite_product.py: VersaTiles block and tile indexes are Brotli-compressed.
+brotli==1.2.1 --hash=sha256:3975fb11f63e212b87a087e4a910187b522c6969a4989ca362d6f85f9dc36acd
