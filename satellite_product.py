@@ -33,7 +33,9 @@ from seamap_product import _atomic_write, _gzip_header, _install_immutable, cell
 GRID_ZOOM = 8
 MIN_ZOOM, MAX_ZOOM = 8, 13
 ATTRIBUTION = "VersaTiles sources (https://versatiles.org/sources/)"
-SOURCE_URL = "https://download.versatiles.org/satellite.versatiles"
+# Canonical location; the former /satellite.versatiles answers 301 here. Redirects
+# are not followed, so the URL recorded in the source identity is the one read.
+SOURCE_URL = "https://download.versatiles.org/satellite-raster/satellite-raster.versatiles"
 # Central Pacific, west=-150.46875°, north=0°; checked to be entirely water.
 OCEAN_SEED = (21, 128)
 LIMIT_BYTES = 300_000_000_000

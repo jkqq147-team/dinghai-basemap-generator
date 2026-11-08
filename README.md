@@ -320,12 +320,19 @@ no App change, upload or deployment and provides no legacy-format output path.
 
 `satellite_product.py` makes **dinghai-satellite**, a separate raster product.
 It uses the official VersaTiles **5.7.0** CLI to remotely cut the published
-`https://download.versatiles.org/satellite.versatiles` by bbox. It never downloads
-the whole container. The publisher's release-asset SHA-256 verifies the CLI
-distribution, and the executable must match that archive. Satellite currently
-has no dated URL in the publisher's satellite URL list: the strong HTTP ETag
-and full container byte length identify the snapshot in the estimate, every
-cell's metadata, and the immutable release record.
+`https://download.versatiles.org/satellite-raster/satellite-raster.versatiles`
+by bbox. It never downloads the whole container. The publisher's release-asset
+SHA-256 verifies the CLI distribution, and the executable must match that
+archive. Redirects are never followed, so the recorded URL is the URL actually
+read; the former `https://download.versatiles.org/satellite.versatiles` now
+answers 301 and is not used. Satellite currently has no dated URL in the
+publisher's satellite URL list
+(`https://download.versatiles.org/satellite-raster/urllist.tsv`). That list
+also gives an MD5, which cannot be checked without downloading the whole
+container and is not recorded. The URL, strong HTTP ETag and full container
+byte length identify the snapshot in the estimate, every cell's metadata, and
+the immutable release record. Releases made before the move record the former
+URL and its ETag.
 
 Selection uses the same full-resolution `depth_product.py` land index and
 the App's XYZ z8 grid. Compute each cell's land fraction from polygon unions
@@ -360,7 +367,8 @@ The estimate uses **only** the coastal list and container indexes, not image
 downloads. It sums all addressed tile lengths without a deduplication discount,
 then reserves 40 bytes per tile and 64 KiB per cell for PMTiles and publication
 overhead. If that conservative estimate exceeds **300,000,000,000 bytes**, stop;
-the build command also refuses it. Cached indexes are scoped to the ETag.
+the build command also refuses it. Cached indexes are scoped to the whole source
+identity (URL, ETag and length).
 The official CLI reads through a loopback range endpoint: every origin request
 uses `If-Match`, verifies the returned ETag/range, and shares a four-request
 semaphore. No remote write is performed. At most four cells run concurrently.
