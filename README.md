@@ -242,10 +242,11 @@ a/landuse=reservoir,basin a/water`, 6.0 GB) with the complete land polygons,
 z6 4.0 MB, z5 1.3 MB, z0–4 0.75 MB), against 82,470,346 bytes zipped
 (110,059,520 unzipped) for GSHHG python-product-2.
 
-### Global run estimate (not run)
+### Global run sizing estimate (before the 20261103 production build)
 
-Measured on this machine (Apple M5 Max, 18 cores, 48 GB) while other
-production ran (load 4–450):
+This pre-release sizing estimate predates the 20261103 global production
+build of all 65,536 cells. Measurements were taken on this machine
+(Apple M5 Max, 18 cores, 48 GB) while other production ran (load 4–450):
 
 - land index: 248 s, 1.38 GB, 2.8 GB peak RSS;
 - depth: 10–14 s per contoured cell with 5 workers, ≈ 1.5 GB RSS each;
