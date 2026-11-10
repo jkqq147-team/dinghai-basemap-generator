@@ -1,4 +1,4 @@
-DingHai Seamap overview and cells / seamap-cell-2
+DingHai Seamap overview and cells / seamap-cell-3
 
 The global overview (land, water) and every cell layer except depth
 (seamark, land, water, wetland, sea_area, landuse, roads, peaks, places)
@@ -7,12 +7,15 @@ and OSM Data's land polygons (OpenStreetMap coastline processing):
 Copyright OpenStreetMap contributors, Open Database License 1.0
 (Licenses/ODbL-1.0.txt, official plain text, opendatacommons.org, retrieved
 2026-10-25; https://www.openstreetmap.org/copyright). This repository
-publishes the method used to derive the cells (ODbL 4.6); source URLs,
-dates, bytes and SHA-256 are recorded in each release manifest and cell. No
-third-party compiled Seamap or Protomaps archive, feature or attribution is
-read or included. Planetiler is an Apache-2.0 build dependency, not
-incorporated into the data; its pinned version and the custom LGPL-3.0-only
-schema are in planetiler/.
+publishes the method used to derive the cells (ODbL 4.6); each release
+record (sources in manifest.json and releases/{release}.json) records the
+URL, date, bytes and SHA-256 of the OSM and land-polygon inputs, and the
+grid name, DOI, bytes and SHA-256 of the GEBCO input. Each cell's own
+metadata carries attribution, licence and the depth notice, not source
+provenance. No third-party compiled Seamap or Protomaps archive, feature
+or attribution is read or included. Planetiler is an Apache-2.0 build
+dependency, not incorporated into the data; its pinned version and the
+custom LGPL-3.0-only schema are in planetiler/.
 
 Depth layer: GEBCO Bathymetric Compilation Group 2026 (2026). The
 GEBCO_2026 Grid - a continuous terrain model for oceans and land at 15
@@ -29,5 +32,6 @@ map data, not an ENC or navigation chart.
 
 tests/fixtures/gebco-fractional.nc is a small GEBCO-format test grid, under
 the GEBCO terms above. depth_product.py, seamap_product.py, audit_seamap.py, land_subset.py,
+satellite_product.py, satellite_overview.py, satellite_mosaics.py, audit_satellite.py,
 planetiler/ and tests/ are offered under LGPL-3.0-only; the GNU LGPLv3 and
 the GPLv3 it incorporates are in Licenses/LGPL-3.0.txt and Licenses/GPL-3.0.txt.
