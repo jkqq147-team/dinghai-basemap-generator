@@ -56,7 +56,7 @@ independent of the release label.
 
 | Cell layer | Zooms | OSM rule (this repository's own) | Fields |
 | --- | --- | --- | --- |
-| `seamark` | 8–14 | every `seamark:type`; piers, breakwaters, groynes, quays, wharves, pontoons from `man_made` | original `seamark:*`, names and `function`; `osm_id`, tile `zoom`; normalized `type`, `category`, `shape`, `color`, `color_pattern`, `topmark_shape`, `topmark_color`, `light_color`, `family`; on seamarks with numbered or sector lights, nodes or ways alike, `dh_sectors`, `dh_light_colour`, `dh_allround_colour` (below) |
+| `seamark` | 8–14 | every `seamark:type`, nodes, ways and areas alike (overhead cables and pipelines are ways); piers, breakwaters, groynes, quays, wharves, pontoons from `man_made` | original `seamark:*`, names and `function`; `osm_id`, tile `zoom`; normalized `type`, `category`, `shape`, `color`, `color_pattern`, `topmark_shape`, `topmark_color`, `light_color`, `family`; on seamarks with numbered or sector lights, nodes or ways alike, `dh_sectors`, `dh_light_colour`, `dh_allround_colour` (below); on bridges, overhead cables and overhead pipelines, `dh_clearance`, `dh_clearance_safe`, `dh_clearance_closed`, `dh_clearance_open` (below) |
 | `land` | 8–14 | `land-polygons-complete-4326` | none: fill and coastline stroke |
 | `water` | 8–14 | `natural=water`, `waterway=riverbank`, `landuse=reservoir/basin`, `water=reservoir/basin/water` | `name`, `water` |
 | `wetland` | 8–14 | `natural=wetland` + mangrove/tidalflat/saltmarsh | `type=wetland`, `category`, `name`, `surface` |
@@ -128,6 +128,39 @@ label from them. For example OSM node
 without bearings) gets `s:156.5,337,l,6`, `multi` and `dh_allround_colour=3`; way
 822828466 (Fan Lau lighthouse, its white 261–154 sector tagged on the building
 outline) gets `s:261,154,l,6` and `6` on its seamark polygon.
+
+### Vertical clearances
+
+A bridge, overhead cable or overhead pipeline (`seamark:type=bridge`,
+`cable_overhead`, `pipeline_overhead`) also gets its vertical clearances as
+numbers in metres, so the App reads a number instead of parsing the OSM
+string (a style's `to-number` would read `15'` as 15 m, about three times the
+real clearance):
+
+| Field | OSM tag ([Seamark Attributes](https://wiki.openstreetmap.org/wiki/Seamarks/Seamark_Attributes)) | S-57 |
+| --- | --- | --- |
+| `dh_clearance` | `seamark:<type>:clearance_height` | VERCLR |
+| `dh_clearance_safe` | `seamark:<type>:clearance_height_safe` | VERCSA |
+| `dh_clearance_closed` | `seamark:<type>:clearance_height_closed` | VERCCL |
+| `dh_clearance_open` | `seamark:<type>:clearance_height_open` | VERCOP |
+
+A clearance must never come out larger than tagged. Accepted, after trimming
+surrounding spaces: a plain decimal (`17`, `54.6`, `.5`), metres, optionally
+followed by `m` (`5 m`); feet as OSM writes them, `15'`, `15 ft` (any case) or
+`15'6"` (inches below 12), at 0.3048 m per foot and 0.0254 m per inch. The result is
+rounded down to the centimetre (`15'` → 4.57, `15'6"` → 4.72, `12.349` →
+12.34). Anything else — `M` (nautical miles), `feet`, a decimal comma, lists
+(`10;12`), `1m30`, `unknown`, words before or after the number — and a value
+that is not above 0 once rounded leaves that field unwritten; nothing is
+guessed or taken from another tag. The original `seamark:<type>:clearance_*`
+strings stay as tagged.
+
+In the Hong Kong cells 8/208/111 and 8/209/111 compiled from the Guangdong,
+Hong Kong and Macau extracts of 2026-11-13, eleven bridge nodes tag
+`clearance_height` as plain metres (node 2187066770, `54.6` →
+`dh_clearance=54.6`) and one overhead cable node tags
+`seamark:cable_overhead:clearance_height_safe=12` (node 2192703195,
+`dh_clearance_safe=12`); no overhead cable or pipeline is mapped as a way there.
 
 ## Depth: illustrative, not surveyed
 

@@ -16,6 +16,7 @@ import com.onthegomap.planetiler.util.Parse;
 import com.onthegomap.planetiler.util.ZoomFunction;
 import java.math.BigDecimal;
 import java.math.BigInteger;
+import java.math.RoundingMode;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Comparator;
@@ -79,6 +80,23 @@ public final class SeamapCompiler implements Profile {
    */
   private static final Map<String, String> SECTOR_GLOW = Map.of(
     "red", "3", "green", "4", "white", "6", "yellow", "6", "amber", "6", "orange", "6");
+  /** Seamark types an object passes under, whose vertical clearances are written in metres. */
+  private static final Set<String> OVERHEAD = Set.of("bridge", "cable_overhead", "pipeline_overhead");
+  /**
+   * {@code seamark:<type>:<key>} (S-57 VERCLR, VERCSA, VERCCL, VERCOP) and the field each is written
+   * to as metres.
+   */
+  private static final Map<String, String> CLEARANCES = Map.of(
+    "clearance_height", "dh_clearance", "clearance_height_safe", "dh_clearance_safe",
+    "clearance_height_closed", "dh_clearance_closed", "clearance_height_open", "dh_clearance_open");
+  /** Metres: a plain decimal, optionally with {@code m}. Not {@code M}: that is nautical miles. */
+  private static final Pattern METRES = Pattern.compile("^(\\d+(?:\\.\\d+)?|\\.\\d+)\\s*m?$");
+  /** Feet as OSM writes them: {@code 15'}, {@code 15 ft} (any case) or with inches, {@code 15'6"}. */
+  private static final Pattern FEET =
+    Pattern.compile("^(\\d+(?:\\.\\d+)?|\\.\\d+)\\s*(?:'|(?i:ft))(?:\\s*(\\d+(?:\\.\\d+)?|\\.\\d+)\\s*\")?$");
+  private static final BigDecimal FOOT = new BigDecimal("0.3048");
+  private static final BigDecimal INCH = new BigDecimal("0.0254");
+  private static final BigDecimal INCHES_PER_FOOT = BigDecimal.valueOf(12);
 
   private final String osmUrl;
   private final String landUrl;
@@ -142,7 +160,38 @@ public final class SeamapCompiler implements Profile {
       .setZoomRange(MIN_ZOOM, MAX_ZOOM)
       .setMinPixelSizeAtAllZooms(0)
       .setBufferPixels(16);
+    if (OVERHEAD.contains(type)) {
+      CLEARANCES.forEach((key, field) -> feature.setAttr(field, clearanceMetres(source.getTag(prefix + key))));
+    }
     return feature;
+  }
+
+  /**
+   * An OSM vertical clearance in metres, rounded down to the centimetre, or {@code null} when it is
+   * not one of the forms below or not above 0 once rounded: a clearance is never guessed or rounded up.
+   * A plain decimal is metres, also with {@code m}; feet are {@code 15'}, {@code 15 ft} (any case)
+   * or {@code 15'6"} (inches below 12), 0.3048 m each.
+   */
+  static Double clearanceMetres(Object value) {
+    if (value == null) {
+      return null;
+    }
+    String text = value.toString().trim();
+    BigDecimal metres;
+    Matcher matcher;
+    if ((matcher = METRES.matcher(text)).matches()) {
+      metres = new BigDecimal(matcher.group(1));
+    } else if ((matcher = FEET.matcher(text)).matches()) {
+      BigDecimal inches = matcher.group(2) == null ? BigDecimal.ZERO : new BigDecimal(matcher.group(2));
+      if (inches.compareTo(INCHES_PER_FOOT) >= 0) {
+        return null;
+      }
+      metres = new BigDecimal(matcher.group(1)).multiply(FOOT).add(inches.multiply(INCH));
+    } else {
+      return null;
+    }
+    metres = metres.setScale(2, RoundingMode.FLOOR);
+    return metres.signum() > 0 ? metres.doubleValue() : null;
   }
 
   /**
