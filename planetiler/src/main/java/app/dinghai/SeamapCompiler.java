@@ -85,7 +85,7 @@ public final class SeamapCompiler implements Profile {
   private final AtomicLong landSeen = new AtomicLong();
   private final AtomicLong landEmitted = new AtomicLong();
 
-  private SeamapCompiler(String osmUrl, String landUrl) {
+  SeamapCompiler(String osmUrl, String landUrl) {
     this.osmUrl = osmUrl;
     this.landUrl = landUrl;
   }
@@ -124,7 +124,9 @@ public final class SeamapCompiler implements Profile {
   private static Feature seamark(Feature feature, SourceFeature source, String type, String category) {
     copyTags(feature, source);
     String prefix = "seamark:" + type + ":";
-    String[] light = source.isPoint() ? lightFields(source.tags()) : null;
+    // A light belongs to its seamark however it is mapped: Fan Lau lighthouse (way 822828466) tags
+    // its sector light on the building outline.
+    String[] light = lightFields(source.tags());
     feature.setAttr("type", type)
       .setAttr("category", category != null ? category : value(source, prefix + "category"))
       .setAttr("shape", value(source, prefix + "shape"))

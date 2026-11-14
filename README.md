@@ -56,7 +56,7 @@ independent of the release label.
 
 | Cell layer | Zooms | OSM rule (this repository's own) | Fields |
 | --- | --- | --- | --- |
-| `seamark` | 8–14 | every `seamark:type`; piers, breakwaters, groynes, quays, wharves, pontoons from `man_made` | original `seamark:*`, names and `function`; `osm_id`, tile `zoom`; normalized `type`, `category`, `shape`, `color`, `color_pattern`, `topmark_shape`, `topmark_color`, `light_color`, `family`; on points with numbered or sector lights `dh_sectors`, `dh_light_colour`, `dh_allround_colour` (below) |
+| `seamark` | 8–14 | every `seamark:type`; piers, breakwaters, groynes, quays, wharves, pontoons from `man_made` | original `seamark:*`, names and `function`; `osm_id`, tile `zoom`; normalized `type`, `category`, `shape`, `color`, `color_pattern`, `topmark_shape`, `topmark_color`, `light_color`, `family`; on seamarks with numbered or sector lights, nodes or ways alike, `dh_sectors`, `dh_light_colour`, `dh_allround_colour` (below) |
 | `land` | 8–14 | `land-polygons-complete-4326` | none: fill and coastline stroke |
 | `water` | 8–14 | `natural=water`, `waterway=riverbank`, `landuse=reservoir/basin`, `water=reservoir/basin/water` | `name`, `water` |
 | `wetland` | 8–14 | `natural=wetland` + mangrove/tidalflat/saltmarsh | `type=wetland`, `category`, `name`, `surface` |
@@ -87,7 +87,7 @@ Planetiler clips complete polygons to tile buffers instead.
 OSM tags a sectored or directional light, and a seamark with several lights,
 as numbered lights, `seamark:light:N:*` (N ≥ 1, even for one sector), usually
 without an unnumbered `seamark:light:colour` and so without `light_color`.
-Such seamark points also get the station fields of DingHai's S-57 light
+Such seamarks, nodes or ways alike, also get the station fields of DingHai's S-57 light
 stations, in the same encoding (dinghai-legal `chartset/tiles.md` §4.2), so
 the App's rose decoder and drawing read them unchanged and colour every light
 from one field without expanding N:
@@ -95,7 +95,7 @@ from one field without expanding N:
 | Field | Value |
 | --- | --- |
 | `dh_sectors` | only with at least one sector or direction: one segment per such light, `;`-separated: sector `s:<start>,<end>,<visibility>,<colours>`, direction `d:<bearing>,<visibility>,<colours>`. Never `hub`: one OSM seamark is the whole station. |
-| `dh_light_colour` | the station's colour for its overview dot and lamp: `3` red, `4` green, `6` yellow when every light that is not obscured has that one glow colour, else `multi` (magenta). The lights are every numbered light, all-round ones included, and the unnumbered light when it is a sector or direction (an unnumbered `range` or `reference` beside numbered lights is not a light). Written on every point with a numbered light or a `dh_sectors`, except when the unnumbered `seamark:light:colour` (`light_color`) is tagged: that already colours it. |
+| `dh_light_colour` | the station's colour for its overview dot and lamp: `3` red, `4` green, `6` yellow when every light that is not obscured has that one glow colour, else `multi` (magenta). The lights are every numbered light, all-round ones included, and the unnumbered light when it is a sector or direction (an unnumbered `range` or `reference` beside numbered lights is not a light). Written on every seamark with a numbered light or a `dh_sectors`, except when the unnumbered `seamark:light:colour` (`light_color`) is tagged: that already colours it. |
 | `dh_allround_colour` | the glow of the all-round lights beside the rose, which S-52 draws with their own lamp and glow over the sectors: `3`, `4` or `6` when every all-round light that is not obscured has that one glow colour, else `multi`; colours as for `dh_light_colour`. An all-round light is a numbered light that is neither a sector nor a direction, or the unnumbered light when it is neither and its `seamark:light:colour` is tagged. Written only with `dh_sectors` and when there is such a light. |
 
 Lights are read in the order: the unnumbered `seamark:light:*`, then each
@@ -125,7 +125,9 @@ label from them. For example OSM node
 `dh_sectors=s:272,245,l,6`, `dh_light_colour=6`; node 6816680116 (white
 165–320, red 320–165) gets `s:165,320,l,6;s:320,165,l,3` and `multi`; node
 1136085219 (Cape Collinson: a white sector 156.5–337 and a red numbered light
-without bearings) gets `s:156.5,337,l,6`, `multi` and `dh_allround_colour=3`.
+without bearings) gets `s:156.5,337,l,6`, `multi` and `dh_allround_colour=3`; way
+822828466 (Fan Lau lighthouse, its white 261–154 sector tagged on the building
+outline) gets `s:261,154,l,6` and `6` on its seamark polygon.
 
 ## Depth: illustrative, not surveyed
 

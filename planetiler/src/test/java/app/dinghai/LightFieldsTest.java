@@ -2,10 +2,19 @@
 package app.dinghai;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 
+import com.onthegomap.planetiler.FeatureCollector;
+import com.onthegomap.planetiler.config.PlanetilerConfig;
+import com.onthegomap.planetiler.geo.GeoUtils;
+import com.onthegomap.planetiler.reader.SimpleFeature;
+import com.onthegomap.planetiler.stats.Stats;
+import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import org.junit.jupiter.api.Test;
+import org.locationtech.jts.geom.Coordinate;
 
 /**
  * Protects the cross-repository contract that the App decodes with the S-57 rose decoder
@@ -106,5 +115,34 @@ class LightFieldsTest {
       @SuppressWarnings("unchecked") Map<String, Object> input = (Map<String, Object>) row[0];
       assertArrayEquals((String[]) row[1], SeamapCompiler.lightFields(input), input.toString());
     }
+  }
+
+  /**
+   * Fan Lau lighthouse (OSM way 822828466) tags its white 261-154 sector light on the building
+   * outline, not on a node: the seamark polygon must carry the station fields a node would, or the
+   * App neither draws nor reads that light.
+   */
+  @Test
+  void lightsTaggedOnAnAreaSeamarkGetTheStationFields() {
+    Map<String, Object> tags = tags("seamark:type", "light_minor", "man_made", "lighthouse",
+      "seamark:light:reference", "P 3524", "seamark:light:1:character", "Fl", "seamark:light:1:colour", "white",
+      "seamark:light:1:range", "14", "seamark:light:1:sector_start", "261", "seamark:light:1:sector_end", "154");
+    var outline = GeoUtils.JTS_FACTORY.createPolygon(new Coordinate[]{
+      new Coordinate(113.8510, 22.2070), new Coordinate(113.8511, 22.2070), new Coordinate(113.8511, 22.2071),
+      new Coordinate(113.8510, 22.2071), new Coordinate(113.8510, 22.2070)});
+    var source = SimpleFeature.create(outline, tags, "osm", null, 822828466);
+    var features = new FeatureCollector.Factory(PlanetilerConfig.defaults(), Stats.inMemory()).get(source);
+    new SeamapCompiler("osm", "land").processFeature(source, features);
+    List<Map<String, Object>> seamarks = new ArrayList<>();
+    features.forEach(feature -> {
+      if ("seamark".equals(feature.getLayer())) {
+        seamarks.add(feature.getAttrsAtZoom(SeamapCompiler.MAX_ZOOM));
+      }
+    });
+    assertEquals(1, seamarks.size());
+    Map<String, Object> attrs = seamarks.getFirst();
+    assertArrayEquals(new Object[]{"s:261,154,l,6", "6", null},
+      new Object[]{attrs.get("dh_sectors"), attrs.get("dh_light_colour"), attrs.get("dh_allround_colour")},
+      attrs.toString());
   }
 }
