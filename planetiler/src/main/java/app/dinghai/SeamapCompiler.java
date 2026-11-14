@@ -136,6 +136,7 @@ public final class SeamapCompiler implements Profile {
       .setAttr("family", "light_major".equals(type) ? "major_aid" : null)
       .setAttr("dh_sectors", light == null ? null : light[0])
       .setAttr("dh_light_colour", light == null ? null : light[1])
+      .setAttr("dh_allround_colour", light == null ? null : light[2])
       .setZoomRange(MIN_ZOOM, MAX_ZOOM)
       .setMinPixelSizeAtAllZooms(0)
       .setBufferPixels(16);
@@ -143,9 +144,9 @@ public final class SeamapCompiler implements Profile {
   }
 
   /**
-   * The lights of one seamark as {@code {dh_sectors, dh_light_colour}} in the encoding of DingHai's
-   * S-57 light stations (dinghai-legal chartset/tiles.md section 4.2), each {@code null} when not
-   * written; {@code null} when neither is.
+   * The lights of one seamark as {@code {dh_sectors, dh_light_colour, dh_allround_colour}} in the
+   * encoding of DingHai's S-57 light stations (dinghai-legal chartset/tiles.md section 4.2), each
+   * {@code null} when not written; {@code null} when none is.
    *
    * <p>Lights are the unnumbered {@code seamark:light:*} and each {@code seamark:light:N:*}, in
    * that order and by ascending N. One is a sector when {@code sector_start} and {@code sector_end}
@@ -161,6 +162,13 @@ public final class SeamapCompiler implements Profile {
    * an unnumbered light in the rose), else {@code multi}. It is written for a seamark with numbered
    * lights or a rose, unless the unnumbered {@code seamark:light:colour} (its {@code light_color})
    * already colours it.
+   *
+   * <p>{@code dh_allround_colour} is the glow of the all-round lights beside a rose, which S-52
+   * draws with their own lamp and glow: the one glow colour shared by every all-round light that
+   * is not obscured, else {@code multi}. An all-round light is a numbered light that is neither a
+   * sector nor a direction, or the unnumbered light when it is neither and its
+   * {@code seamark:light:colour} is tagged. It is written only with {@code dh_sectors} and when there
+   * is such a light.
    */
   static String[] lightFields(Map<String, Object> tags) {
     // By value, then as written: "02" and "2" are distinct keys.
@@ -178,7 +186,10 @@ public final class SeamapCompiler implements Profile {
 
     List<String> entries = new ArrayList<>();
     Set<String> dotColours = new TreeSet<>();
+    Set<String> allRoundColours = new TreeSet<>();
     boolean unmapped = false;
+    boolean allRoundUnmapped = false;
+    boolean allRoundLight = false;
     for (String prefix : prefixes) {
       Set<String> visibility = words(tags.get(prefix + "visibility"));
       String shown = visibility.contains("obscured") ? "o"
@@ -193,9 +204,19 @@ public final class SeamapCompiler implements Profile {
       } else if (!"o".equals(shown) && orientation != null &&
         (category.contains("directional") || category.contains("moire"))) {
         entries.add("d:" + orientation + "," + shown + "," + String.join("+", colours));
-      } else if (prefix.equals("seamark:light:")) {
-        // Its range, height or reference describe the numbered lights, not a light of its own.
-        continue;
+      } else {
+        boolean unnumbered = prefix.equals("seamark:light:");
+        // An all-round light. The unnumbered one is a light only with a colour: alone, its range,
+        // height or reference describe the numbered lights. It never colours the station: its
+        // colour is light_color, which then leaves dh_light_colour unwritten.
+        if (!"o".equals(shown) && (!unnumbered || tags.get(prefix + "colour") != null)) {
+          allRoundLight = true;
+          allRoundUnmapped |= colours.isEmpty();
+          allRoundColours.addAll(colours);
+        }
+        if (unnumbered) {
+          continue;
+        }
       }
       if (!"o".equals(shown)) {
         unmapped |= colours.isEmpty();
@@ -204,11 +225,18 @@ public final class SeamapCompiler implements Profile {
     }
     String sectors = entries.isEmpty() ? null : String.join(";", entries);
     String dot = tags.get("seamark:light:colour") != null || (numbers.isEmpty() && sectors == null) ? null
-      : !unmapped && dotColours.size() == 1 ? dotColours.iterator().next() : "multi";
+      : oneGlow(dotColours, unmapped);
+    String allRound = sectors == null || !allRoundLight ? null
+      : oneGlow(allRoundColours, allRoundUnmapped);
     if (sectors == null && dot == null) {
       return null;
     }
-    return new String[]{sectors, dot};
+    return new String[]{sectors, dot, allRound};
+  }
+
+  /** The one glow colour of some lights, else {@code multi} (magenta). */
+  private static String oneGlow(Set<String> glows, boolean unmapped) {
+    return !unmapped && glows.size() == 1 ? glows.iterator().next() : "multi";
   }
 
   /** Lower-case values of an OSM list ({@code a;b}). */

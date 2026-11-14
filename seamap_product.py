@@ -47,6 +47,7 @@ FIELDS = {
                 "color_pattern": "String", "topmark_shape": "String", "topmark_color": "String",
                 "light_color": "String", "family": "String", "osm_id": "Number", "zoom": "Number",
                 "dh_sectors": "String", "dh_light_colour": "String",
+                "dh_allround_colour": "String",
                 "name": "String", "name:zh": "String", "name:zh-Hans": "String", "seamark:*": "String"},
     "land": {},
     "water": {"name": "String", "water": "String"},
