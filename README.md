@@ -56,7 +56,7 @@ independent of the release label.
 
 | Cell layer | Zooms | OSM rule (this repository's own) | Fields |
 | --- | --- | --- | --- |
-| `seamark` | 8–14 | every `seamark:type`; piers, breakwaters, groynes, quays, wharves, pontoons from `man_made` | original `seamark:*`, names and `function`; `osm_id`, tile `zoom`; normalized `type`, `category`, `shape`, `color`, `color_pattern`, `topmark_shape`, `topmark_color`, `light_color`, `family` |
+| `seamark` | 8–14 | every `seamark:type`; piers, breakwaters, groynes, quays, wharves, pontoons from `man_made` | original `seamark:*`, names and `function`; `osm_id`, tile `zoom`; normalized `type`, `category`, `shape`, `color`, `color_pattern`, `topmark_shape`, `topmark_color`, `light_color`, `family`; on points with numbered or sector lights `dh_sectors`, `dh_light_colour` (below) |
 | `land` | 8–14 | `land-polygons-complete-4326` | none: fill and coastline stroke |
 | `water` | 8–14 | `natural=water`, `waterway=riverbank`, `landuse=reservoir/basin`, `water=reservoir/basin/water` | `name`, `water` |
 | `wetland` | 8–14 | `natural=wetland` + mangrove/tidalflat/saltmarsh | `type=wetland`, `category`, `name`, `surface` |
@@ -73,13 +73,58 @@ so features are emitted from those zooms. Protomaps' basemap profile is
 BSD-3-Clause (compatible with this LGPL-3.0-only code) but was not reused: it
 brings its own schema and extra inputs (Natural Earth, QRank) that this
 single-snapshot product does not want. `light` is not separate: lights are
-seamarks with `light_color`. `waterway` lines are not emitted because the App
-does not read them.
+seamarks with `seamark:light:*` tags (`light_color` normalizes only the
+unnumbered `seamark:light:colour`). `waterway` lines are not emitted because
+the App does not read them.
 
 Complete, not split, OSM land polygons are deliberate. The official split
 product has overlapping processing chunks; since the App strokes every land
 polygon edge, artificial chunk edges could become false inland coasts.
 Planetiler clips complete polygons to tile buffers instead.
+
+### Numbered, sector and directional lights
+
+OSM tags a sectored or directional light, and a seamark with several lights,
+as numbered lights, `seamark:light:N:*` (N ≥ 1, even for one sector), usually
+without an unnumbered `seamark:light:colour` and so without `light_color`.
+Such seamark points also get the station fields of DingHai's S-57 light
+stations, in the same encoding (dinghai-legal `chartset/tiles.md` §4.2), so
+the App's rose decoder and drawing read them unchanged and colour every light
+from one field without expanding N:
+
+| Field | Value |
+| --- | --- |
+| `dh_sectors` | only with at least one sector or direction: one segment per such light, `;`-separated: sector `s:<start>,<end>,<visibility>,<colours>`, direction `d:<bearing>,<visibility>,<colours>`. Never `hub`: one OSM seamark is the whole station. |
+| `dh_light_colour` | the station's colour for its overview dot and lamp: `3` red, `4` green, `6` yellow when every light that is not obscured has that one glow colour, else `multi` (magenta). The lights are every numbered light, all-round ones included, and the unnumbered light when it is a sector or direction (an unnumbered `range` or `reference` beside numbered lights is not a light). Written on every point with a numbered light or a `dh_sectors`, except when the unnumbered `seamark:light:colour` (`light_color`) is tagged: that already colours it. |
+
+Lights are read in the order: the unnumbered `seamark:light:*`, then each
+`seamark:light:N:*` by ascending N. A light is a sector when `sector_start`
+and `sector_end` are distinct plain decimal degrees in 0–360; otherwise a
+direction when its `category` lists `directional` or `moire` (S-57 CATLIT 1,
+16) with such an `orientation` and it is not obscured; any other light (an
+all-round light, malformed or out-of-range bearings, 0 to 360) is not in
+`dh_sectors`, as the App's resolver of S-57 `LIGHTS` decides. Degrees are written as
+tagged, without trailing zeros, 360 as 0. OSM `sector_start`/`sector_end` are
+S-57 SECTR1/SECTR2: bearings from seaward towards the light, clockwise
+([Seamarks/Lights](https://wiki.openstreetmap.org/wiki/Seamarks/Lights), whose
+obscured sector is "not visible from seaward"; the
+[sectored-light diagram](https://wiki.openstreetmap.org/wiki/Seamarks/Sectored_and_Directional_Lights)
+puts 0° below the light).
+
+| OSM tag | Encoded |
+| --- | --- |
+| `visibility` | `o` when it lists `obscured` (colours then empty), `f` for `faint` or `part_obscured`, else `l` |
+| `colour` | `red` → `3`, `green` → `4`, `white`/`yellow`/`amber`/`orange` → `6`; alternating colours `+`-joined in order, a repeated glow once; empty (magenta) when a colour has no glow, more than two glows remain or none is tagged |
+
+Nothing else is derived: the characteristic, range and the other light tags
+stay only as the original `seamark:light:N:*` tags; the App writes the light
+label from them. For example OSM node
+1293080019 (Xiya Island, `seamark:type=light_major`,
+`seamark:light:1:colour=white`, `sector_start=272`, `sector_end=245`) gets
+`dh_sectors=s:272,245,l,6`, `dh_light_colour=6`; node 6816680116 (white
+165–320, red 320–165) gets `s:165,320,l,6;s:320,165,l,3` and `multi`; node
+1136085219 (a white sector 156.5–337 and a red numbered light without
+bearings) gets `s:156.5,337,l,6` and `multi`.
 
 ## Depth: illustrative, not surveyed
 

@@ -14,14 +14,20 @@ import com.onthegomap.planetiler.geo.TileCoord;
 import com.onthegomap.planetiler.reader.SourceFeature;
 import com.onthegomap.planetiler.util.Parse;
 import com.onthegomap.planetiler.util.ZoomFunction;
+import java.math.BigDecimal;
+import java.math.BigInteger;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.TreeSet;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Consumer;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import org.locationtech.jts.geom.Geometry;
 import org.locationtech.jts.geom.Polygon;
 import org.locationtech.jts.geom.util.GeometryFixer;
@@ -63,6 +69,16 @@ public final class SeamapCompiler implements Profile {
     Map.entry("tertiary", "secondary"), Map.entry("tertiary_link", "secondary"));
   /** First zoom of each place kind: the App draws it from there. */
   private static final Map<String, Integer> PLACES = Map.of("town", 9, "village", 11, "locality", 12);
+  /** {@code seamark:light:N:*}: the numbered lights (sectors, directions) of one seamark. */
+  private static final Pattern NUMBERED_LIGHT = Pattern.compile("^seamark:light:(\\d+):");
+  /** Plain decimal degrees; {@link Double#parseDouble} would also take "245d", "1e2" or "NaN". */
+  private static final Pattern DEGREES = Pattern.compile("^(\\d+(\\.\\d*)?|\\.\\d+)$");
+  /**
+   * OSM light colours as the glow colour codes of {@code dh_sectors} (tiles.md section 4.2:
+   * 3 red, 4 green, 6 for S-57 COLOUR 1, 6, 9 and 11).
+   */
+  private static final Map<String, String> SECTOR_GLOW = Map.of(
+    "red", "3", "green", "4", "white", "6", "yellow", "6", "amber", "6", "orange", "6");
 
   private final String osmUrl;
   private final String landUrl;
@@ -108,6 +124,7 @@ public final class SeamapCompiler implements Profile {
   private static Feature seamark(Feature feature, SourceFeature source, String type, String category) {
     copyTags(feature, source);
     String prefix = "seamark:" + type + ":";
+    String[] light = source.isPoint() ? lightFields(source.tags()) : null;
     feature.setAttr("type", type)
       .setAttr("category", category != null ? category : value(source, prefix + "category"))
       .setAttr("shape", value(source, prefix + "shape"))
@@ -117,10 +134,125 @@ public final class SeamapCompiler implements Profile {
       .setAttr("topmark_color", colours(value(source, "seamark:topmark:colour")))
       .setAttr("light_color", colours(value(source, "seamark:light:colour")))
       .setAttr("family", "light_major".equals(type) ? "major_aid" : null)
+      .setAttr("dh_sectors", light == null ? null : light[0])
+      .setAttr("dh_light_colour", light == null ? null : light[1])
       .setZoomRange(MIN_ZOOM, MAX_ZOOM)
       .setMinPixelSizeAtAllZooms(0)
       .setBufferPixels(16);
     return feature;
+  }
+
+  /**
+   * The lights of one seamark as {@code {dh_sectors, dh_light_colour}} in the encoding of DingHai's
+   * S-57 light stations (dinghai-legal chartset/tiles.md section 4.2), each {@code null} when not
+   * written; {@code null} when neither is.
+   *
+   * <p>Lights are the unnumbered {@code seamark:light:*} and each {@code seamark:light:N:*}, in
+   * that order and by ascending N. One is a sector when {@code sector_start} and {@code sector_end}
+   * (bearings from seaward, clockwise, as S-57 SECTR1 and SECTR2) are distinct decimal degrees in
+   * 0-360 (360 is written 0), else a direction when its {@code category} lists {@code directional}
+   * or {@code moire} (CATLIT 1 or 16) with an {@code orientation} in 0-360 and it is not obscured;
+   * any other light is not in the rose, as the App's own resolver of S-57 lights decides.
+   * Degrees are written as tagged, without trailing zeros. {@code dh_sectors} lists the sectors and
+   * directions when there is one; an OSM seamark is a whole station, so it is never {@code hub}.
+   *
+   * <p>{@code dh_light_colour} is the station's overview-dot and lamp colour: the one glow colour
+   * shared by every light that is not obscured (each numbered light, all-round ones included, and
+   * an unnumbered light in the rose), else {@code multi}. It is written for a seamark with numbered
+   * lights or a rose, unless the unnumbered {@code seamark:light:colour} (its {@code light_color})
+   * already colours it.
+   */
+  static String[] lightFields(Map<String, Object> tags) {
+    // By value, then as written: "02" and "2" are distinct keys.
+    TreeSet<String> numbers = new TreeSet<>(
+      Comparator.comparing((String number) -> new BigInteger(number)).thenComparing(Comparator.naturalOrder()));
+    for (String key : tags.keySet()) {
+      Matcher matcher = NUMBERED_LIGHT.matcher(key);
+      if (matcher.find()) {
+        numbers.add(matcher.group(1));
+      }
+    }
+    List<String> prefixes = new ArrayList<>();
+    prefixes.add("seamark:light:");
+    numbers.forEach(number -> prefixes.add("seamark:light:" + number + ":"));
+
+    List<String> entries = new ArrayList<>();
+    Set<String> dotColours = new TreeSet<>();
+    boolean unmapped = false;
+    for (String prefix : prefixes) {
+      Set<String> visibility = words(tags.get(prefix + "visibility"));
+      String shown = visibility.contains("obscured") ? "o"
+        : visibility.contains("faint") || visibility.contains("part_obscured") ? "f" : "l";
+      List<String> colours = "o".equals(shown) ? List.of() : glowColours(tags.get(prefix + "colour"));
+      String start = degrees(tags.get(prefix + "sector_start"));
+      String end = degrees(tags.get(prefix + "sector_end"));
+      String orientation = degrees(tags.get(prefix + "orientation"));
+      Set<String> category = words(tags.get(prefix + "category"));
+      if (start != null && end != null && !start.equals(end)) {
+        entries.add("s:" + start + "," + end + "," + shown + "," + String.join("+", colours));
+      } else if (!"o".equals(shown) && orientation != null &&
+        (category.contains("directional") || category.contains("moire"))) {
+        entries.add("d:" + orientation + "," + shown + "," + String.join("+", colours));
+      } else if (prefix.equals("seamark:light:")) {
+        // Its range, height or reference describe the numbered lights, not a light of its own.
+        continue;
+      }
+      if (!"o".equals(shown)) {
+        unmapped |= colours.isEmpty();
+        dotColours.addAll(colours);
+      }
+    }
+    String sectors = entries.isEmpty() ? null : String.join(";", entries);
+    String dot = tags.get("seamark:light:colour") != null || (numbers.isEmpty() && sectors == null) ? null
+      : !unmapped && dotColours.size() == 1 ? dotColours.iterator().next() : "multi";
+    if (sectors == null && dot == null) {
+      return null;
+    }
+    return new String[]{sectors, dot};
+  }
+
+  /** Lower-case values of an OSM list ({@code a;b}). */
+  private static Set<String> words(Object value) {
+    Set<String> words = new TreeSet<>();
+    if (value != null) {
+      for (String word : value.toString().split(";")) {
+        words.add(word.trim().toLowerCase());
+      }
+    }
+    return words;
+  }
+
+  /**
+   * Glow codes of an OSM light colour, as the App reads S-57 COLOUR for a sector: repeats of one
+   * glow merged; none when a colour has no glow, when more than two remain, or when untagged.
+   */
+  private static List<String> glowColours(Object value) {
+    List<String> glows = new ArrayList<>();
+    if (value == null) {
+      return glows;
+    }
+    for (String colour : value.toString().split(";", -1)) {
+      String glow = SECTOR_GLOW.get(colour.trim().toLowerCase());
+      if (glow == null) {
+        return List.of();
+      }
+      if (glows.isEmpty() || !glows.get(glows.size() - 1).equals(glow)) {
+        glows.add(glow);
+      }
+    }
+    return glows.size() <= 2 ? glows : List.of();
+  }
+
+  /** Decimal degrees in 0-360 as written (360 as 0), or {@code null}. */
+  private static String degrees(Object value) {
+    if (value == null || !DEGREES.matcher(value.toString().trim()).matches()) {
+      return null;
+    }
+    BigDecimal degrees = new BigDecimal(value.toString().trim());
+    if (degrees.compareTo(BigDecimal.valueOf(360)) > 0) {
+      return null;
+    }
+    return degrees.compareTo(BigDecimal.valueOf(360)) == 0 ? "0" : degrees.stripTrailingZeros().toPlainString();
   }
 
   private static String landuse(SourceFeature source) {
