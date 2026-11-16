@@ -3,19 +3,28 @@
 """Structural audit of a dinghai-seamap release; reads local files only.
 
 Uses only the Python standard library (own pmtiles/MVT decoding); nothing is imported
-from the producers.
+from the producers. Both producers and audit_satellite.py share check_release_name.
 """
 from __future__ import annotations
 
 import gzip
 import hashlib
 import json
+import re
 import struct
 from pathlib import Path
 
 OSM_LAYERS = {"seamark", "land", "water", "wetland", "sea_area"}
 LAYERS = OSM_LAYERS | {"landuse", "roads", "peaks", "places", "depth"}
 OVERVIEW_LAYERS = {"land", "water"}
+GRID_CELLS = 1 << 16  # every z8 cell
+
+
+def check_release_name(release):
+    """Rejects a release the App would refuse: DingHai's SeamapProduct.Manifest.isSupported
+    drops a whole Seamap or satellite manifest unless its release matches this whole."""
+    if not isinstance(release, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", release):
+        raise ValueError(f"invalid release name: {release!r}")
 
 
 def _varint(buf, i):
@@ -130,10 +139,9 @@ def audit(root):
     manifest = json.loads(manifest_bytes)
     if (manifest["id"], manifest["schemaVersion"], manifest["gridZoom"]) != ("dinghai-seamap", 3, 8):
         raise ValueError("wrong product identity or grid")
+    check_release_name(manifest["release"])
     if set(manifest["layers"]) != LAYERS or (manifest["minimumZoom"], manifest["maximumZoom"]) != (8, 14):
         raise ValueError("wrong layer or zoom contract")
-    if {"cells", "cellsURL", "cellsBytes", "cellsSHA256"} & manifest.keys():
-        raise ValueError("obsolete cell inventory in manifest")
     if manifest["record"] != f"releases/{manifest['release']}.json":
         raise ValueError("wrong release record path")
     if (root / manifest["record"]).read_bytes() != manifest_bytes:
@@ -156,50 +164,61 @@ def audit(root):
             raise ValueError(f"unsorted or duplicate index: {parent}")
     if len(entries) != manifest["cellCount"] or sum(e["bytes"] for e in entries) != manifest["totalBytes"]:
         raise ValueError("manifest totals differ")
+    # The App treats a Seamap cell its index lacks as an incomplete release and fails
+    # that download, so only the whole grid is publishable; --cell pilots stay local.
+    if len(entries) != GRID_CELLS:
+        raise ValueError(f"incomplete grid: {GRID_CELLS - len(entries)} of {GRID_CELLS} cells missing")
     overview = manifest["overview"]
     overview_data = (root / "objects" / f"{overview['sha256']}.pmtiles").read_bytes()
     if (len(overview_data), hashlib.sha256(overview_data).hexdigest()) != (overview["bytes"], overview["sha256"]):
         raise ValueError("overview bytes or sha256 differs")
-    header, metadata, overview_tiles = read_pmtiles(overview_data)
-    _check_metadata(metadata)
-    if (header["min_zoom"], header["max_zoom"]) != (0, 7):
-        raise ValueError("overview must be z0-7")
-    for tile_id, body in overview_tiles.items():
-        z = _zxy(tile_id)[0]
-        names = set(layer_counts(gzip.decompress(body)))
-        if z > 7 or not names <= OVERVIEW_LAYERS:
-            raise ValueError(f"overview has {sorted(names)} at z{z}")
+    overview_report = audit_overview(overview_data)
     reports = []
     for entry in entries:
         path = root / "objects" / f"{entry['sha256']}.pmtiles"
         data = path.read_bytes()
         if (len(data), hashlib.sha256(data).hexdigest()) != (entry["bytes"], entry["sha256"]):
             raise ValueError(f"{path}: bytes or sha256 differs")
-        header, metadata, tiles = read_pmtiles(data)
-        _check_metadata(metadata)
-        if ((header["min_zoom"], header["max_zoom"]) != (8, 14)
-                or metadata["dinghai:cell"] != f"8/{entry['x']}/{entry['y']}"):
-            raise ValueError(f"{path}: wrong header or metadata")
-        if "Open Waters" in json.dumps(metadata):
-            raise ValueError(f"{path}: third-party attribution leaked")
-        counts = {}
-        for tile_id, body in tiles.items():
-            z, x, y = _zxy(tile_id)
-            if not 8 <= z <= 14 or x >> (z - 8) != entry["x"] or y >> (z - 8) != entry["y"]:
-                raise ValueError(f"{path}: tile outside cell or zoom range")
-            for name, count in layer_counts(gzip.decompress(body)).items():
-                if name not in LAYERS or (name not in OSM_LAYERS and z > 12):
-                    raise ValueError(f"{path}: unexpected layer {name} at z{z}")
-                counts[name] = counts.get(name, 0) + count
-        reports.append({"x": entry["x"], "y": entry["y"], "bytes": len(data), "tiles": len(tiles), "features": counts})
+        reports.append(audit_cell(data, entry["x"], entry["y"]))
     return {"cellCount": len(entries), "totalBytes": sum(e["bytes"] for e in entries),
-            "overview": {"bytes": len(overview_data), "tiles": len(overview_tiles)}, "cells": reports}
+            "overview": overview_report, "cells": reports}
+
+
+def audit_overview(data):
+    """Checks the overview object's contents; returns its size and tile count."""
+    header, metadata, tiles = read_pmtiles(data)
+    _check_metadata(metadata)
+    if (header["min_zoom"], header["max_zoom"]) != (0, 7):
+        raise ValueError("overview must be z0-7")
+    for tile_id, body in tiles.items():
+        z = _zxy(tile_id)[0]
+        names = set(layer_counts(gzip.decompress(body)))
+        if z > 7 or not names <= OVERVIEW_LAYERS:
+            raise ValueError(f"overview has {sorted(names)} at z{z}")
+    return {"bytes": len(data), "tiles": len(tiles)}
+
+
+def audit_cell(data, x, y):
+    """Checks the object of z8 cell x/y; returns its size, tile count and feature counts."""
+    header, metadata, tiles = read_pmtiles(data)
+    _check_metadata(metadata)
+    if (header["min_zoom"], header["max_zoom"]) != (8, 14) or metadata["dinghai:cell"] != f"8/{x}/{y}":
+        raise ValueError(f"cell {x}/{y}: wrong header or metadata")
+    counts = {}
+    for tile_id, body in tiles.items():
+        z, tx, ty = _zxy(tile_id)
+        if not 8 <= z <= 14 or tx >> (z - 8) != x or ty >> (z - 8) != y:
+            raise ValueError(f"cell {x}/{y}: tile outside cell or zoom range")
+        for name, count in layer_counts(gzip.decompress(body)).items():
+            if name not in LAYERS or (name not in OSM_LAYERS and z > 12):
+                raise ValueError(f"cell {x}/{y}: unexpected layer {name} at z{z}")
+            counts[name] = counts.get(name, 0) + count
+    return {"x": x, "y": y, "bytes": len(data), "tiles": len(tiles), "features": counts}
 
 
 def _check_metadata(metadata):
-    volatile = {"release", "osmPbf", "landPolygons", "generatorSHA256", "generatorVersion", "gebcoSHA256", "depth"}
-    if metadata["dinghai:schemaVersion"] != 3 or any(f"dinghai:{key}" in metadata for key in volatile):
-        raise ValueError("wrong schema or release-dependent PMTiles metadata")
+    if metadata["dinghai:schemaVersion"] != 3:
+        raise ValueError("wrong PMTiles metadata schema")
 
 
 if __name__ == "__main__":

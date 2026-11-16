@@ -27,6 +27,7 @@ import shapely
 from pmtiles.tile import Compression, Entry, TileType, deserialize_directory, zxy_to_tileid
 from pmtiles.writer import finalize_header
 
+from audit_seamap import check_release_name
 import depth_product
 from seamap_product import _atomic_write, _gzip_header, _install_immutable, cell_bounds
 
@@ -343,8 +344,7 @@ def verify_distribution(cli, archive, output):
 
 
 def finalize(output, release, entries, identity):
-    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", release):
-        raise ValueError("release must be a filename component")
+    check_release_name(release)
     output = Path(output)
     shards = defaultdict(list)
     for entry in sorted(entries, key=lambda e: (e["x"], e["y"])):
@@ -356,7 +356,7 @@ def finalize(output, release, entries, identity):
         digest = hashlib.sha256(data).hexdigest()
         _atomic_write(output / "index" / f"{digest}.json", data, immutable=True)
         index[parent] = digest
-    manifest = {"id": "dinghai-satellite", "manifestVersion": 1, "schemaVersion": 3,
+    manifest = {"id": "dinghai-satellite", "schemaVersion": 3,
                 "release": release, "gridZoom": 8, "minimumZoom": 8, "maximumZoom": 13,
                 "tileType": "webp", "tileSize": 512, "attribution": ATTRIBUTION,
                 "sources": identity["sources"], "generatorIdentity": identity["generatorIdentity"],

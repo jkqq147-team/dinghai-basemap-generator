@@ -25,10 +25,7 @@ seamap.pmtiles ─ seamap_product.py ─┬─ objects/<sha256>.pmtiles   overvi
 
 No Protomaps build, no per-cell merge of a second product and no third-party
 Seamap archive is read, redistributed or credited. Tiles are copied from the
-compiled archive into the overview and cells, never re-encoded. The former
-GSHHG marine background (`gshhg_product.py`, `DingHaiCoastlines.sqlite`) and
-land-product-1 (`land_product.py`) are gone; the overview replaces the first,
-the cells' land layers the second.
+compiled archive into the overview and cells, never re-encoded.
 
 | File | Role |
 | --- | --- |
@@ -37,18 +34,21 @@ the cells' land layers the second.
 | `seamap_product.py` | cuts the compiled archive into immutable objects, index shards and release records; `manifest.json` |
 | `audit_seamap.py` | stdlib-only structural audit of a release |
 | `land_subset.py` | pilots only: selects whole land polygons around pilot boxes |
+| `satellite_product.py` | coastal satellite: estimate, CLI verification, ETag-pinned extraction and v3 release |
+| `satellite_overview.py` | adds the z0–6 satellite overview to a finished, unpublished local release |
+| `satellite_mosaics.py` | renders native-tile mosaics of three random published satellite cells for visual review |
+| `audit_satellite.py` | structural audit of a satellite release, decoding every WebP image |
 
 ## Layers and App-facing fields
 
-The overview (z0–7) has two layers without fields. They carry what the GSHHG
-background drew when zoomed out — sea, land, lake fills and the sea coast
-including island outlines — and nothing more: no depth bands and no sea-area
-names, which the App shows only from z8 in cells.
+The overview (z0–7) has two layers without fields. They carry sea, land, lake
+fills and the sea coast including island outlines, and nothing more: no depth
+bands and no sea-area names, which the App shows only from z8 in cells.
 
 | Overview layer | Source | App use |
 | --- | --- | --- |
 | `land` | OSM land polygons, simplified per zoom (0.25 px) | land fill; its own edges are the coastline and island outlines (tile-clipped edges fall in the tile buffer, as for cells) |
-| `water` | the cell `water` rule without river polygons (`waterway=riverbank`, `water=river/canal/stream/ditch/drain/oxbow`), no fields, under 2 px dropped per zoom | lake and reservoir fill, drawn in the sea colour and not stroked, like GSHHG's even levels |
+| `water` | the cell `water` rule without river polygons (`waterway=riverbank`, `water=river/canal/stream/ditch/drain/oxbow`), no fields, under 2 px dropped per zoom | lake and reservoir fill, drawn in the sea colour and not stroked |
 
 Cells retain the ten layer names, fields and per-layer zoom ranges
 (`vector_layers`). Publication uses schemaVersion 3 and content addresses,
@@ -220,7 +220,12 @@ pilot's depth thousands of kilometres away. The compiler keeps every depth
 vertex (`depth_product.py` already generalised each zoom on its own lattice,
 on the 4096-per-tile grid of that zoom) and drops no small pieces.
 
-## Rebuild in an empty directory
+## Rebuild from the repository root
+
+Run these commands in the repository root. Git ignores the inputs placed there
+and everything the commands write (`.venv/`, `land-polygons-complete/`,
+`land-index.sqlite`, `depth/`, `seamap.pmtiles`, `provenance.json`, `out/`,
+`state/`, and a pilot's `pilot/`).
 
 Verified environment: CPython 3.12.7 with `requirements.txt` (macOS arm64
 wheels), Java 21, Maven, osmium-tool. Inputs: a dated planet PBF (record URL,
@@ -268,7 +273,9 @@ filter returned zero features for these WGS84 polygons. For a pilot,
 pre-clip the OSM input (`osmium extract --strategy=smart -p region.geojson`)
 and the land polygons (`land_subset.py land_polygons.shp pilot/land_polygons.shp
 --bbox W,S,E,N …`), build depth only for the pilot cells (`--cell X/Y`), and
-slice with `--cell X/Y`. The overview of a pilot covers only its region.
+slice with `--cell X/Y`. The overview of a pilot covers only its region. A
+pilot is a local experiment only: it lacks cells, so `audit_seamap.py` rejects
+it, and it is never published.
 
 `seamap_product.py` resumes a cell only when the global input/generator identity
 matches and its content-addressed object exists. It rebuilds the overview every
@@ -281,36 +288,10 @@ published index. `audit_seamap.py` derives its own feature counts from the tiles
 Only after every selected cell succeeds does finalize publish the shards and an
 immutable release record, then atomically replace `manifest.json`. Repeating an
 identical release is safe; trying to reuse its name with different manifest bytes
-fails without moving the pointer. Start v3 in a fresh output directory. Existing
-objects and shards may be shared by multiple releases and are never pruned here.
-
-### Pilot against seamap-cell-1 (2026-11-03)
-
-Five cells from `planet-261026` (an `osmium extract --strategy=smart` of the
-cells plus 0.25°), the 2026-10-31 land polygons (`land_subset.py`) and
-GEBCO_2026, compared with seamap-cell-1 cells rebuilt from the same planet's
-marine archive and land-product-1 release 20261028. `vector_layers` metadata
-and every layer's field-name set are identical in all five.
-
-| Cell | seamap-cell-1 B | seamap-cell-2 B | Change |
-| --- | ---: | ---: | --- |
-| Hong Kong 8/209/111 | 7,180,492 | 7,172,551 | −0.1 % |
-| Dachen 8/214/106 | 3,311,913 | 3,409,391 | +2.9 % |
-| Malta 8/138/100 | 839,247 | 836,065 | −0.4 % |
-| Offshore 8/225/113 | 1,028 | 5,416 | depth bands added (341 tiles, deduplicated) |
-| Inland 8/203/99 | 478,200 | 502,109 | +5.0 % |
-
-Per layer: `seamark`, `water`, `wetland` and `sea_area` are unchanged except
-one Malta submarine cable that has no node inside the pilot extract. Depth differs by at most 3 features per
-cell (OSM land instead of Protomaps `earth` as the offshore mask; +2–6 %
-bytes). Roads keep the same per-class-per-tile feature counts at −22…+6 %
-bytes; land use +10…+15 %; land −1 %; places +6…+63 % (OSM names and islands instead
-of Protomaps' label thinning); peaks are now all present at z11 as well as
-z12 (2× features, ≈ 40 KB more for Hong Kong). seamap-cell-1 had no depth in
-cells outside land-product-1's coastal list, so its deep-water cells met
-coastal cells' 200 m band at a cell edge; every ocean cell now carries its
-bands. Total 11,810,880 → 11,925,532 B (+1.0 %). Pilot compile: 71–179 s,
-≤ 5.3 GB peak RSS (6 threads).
+fails without moving the pointer. A release name must match
+`[A-Za-z0-9][A-Za-z0-9._-]*`, the App's rule for both products; finalize and
+both audits reject any other name. Existing objects and shards may be shared
+by multiple releases and are never pruned here.
 
 ### Global overview check (2026-11-03)
 
@@ -320,30 +301,7 @@ of `planet-261026` (`a/natural=water a/waterway=riverbank
 a/landuse=reservoir,basin a/water`, 6.0 GB) with the complete land polygons,
 `--maxzoom=7`: 274 s, then cut by `build_overview`. The file is
 **17,860,905 bytes** (21,845 possible tiles, 11,604 present; z7 is 12.0 MB,
-z6 4.0 MB, z5 1.3 MB, z0–4 0.75 MB), against 82,470,346 bytes zipped
-(110,059,520 unzipped) for GSHHG python-product-2.
-
-### Global run sizing estimate (before the 20261103 production build)
-
-This pre-release sizing estimate predates the 20261103 global production
-build of all 65,536 cells. Measurements were taken on this machine
-(Apple M5 Max, 18 cores, 48 GB) while other production ran (load 4–450):
-
-- land index: 248 s, 1.38 GB, 2.8 GB peak RSS;
-- depth: 10–14 s per contoured cell with 5 workers, ≈ 1.5 GB RSS each;
-  uniform cells take milliseconds. 13,856 contoured cells at 12 workers:
-  about 4 h, up to 6 h under load. Output about 10–20 GB of Shapefiles
-  (pilot: 0.4–2.0 MB per coastal cell);
-- compile: seamap-cell-1's marine-only global compile took about 1.5 h at
-  `-Xmx24g`; the land layers (global land use is the largest), depth and
-  z0–7 add work: expect 2–4 h;
-- cutting: 0.2–1.3 s per cell with 5 threads, about 1–2 h for all cells.
-
-Disk beyond the inputs (planet 95.6 GB, land ZIP and Shapefile 2.2 GB, GEBCO
-7.5 GB): land index 1.4 GB, depth 10–20 GB, Planetiler temporary data
-≈ 150 GB at its peak (seamap-cell-1's run peaked at 229 GB including the
-planet), compiled archive and release ≈ 20–30 GB each. Plan for **≈ 250 GB
-free** besides the inputs.
+z6 4.0 MB, z5 1.3 MB, z0–4 0.75 MB).
 
 ## Output contract
 
@@ -382,11 +340,13 @@ belong in the manifest and its immutable release record. Every gzip member
 (tiles, metadata, root and leaf directories) has mtime 0 and OS byte 255.
 Index JSON uses fixed compact separators and sorted rows before hashing.
 
-`audit_seamap.py` checks object and shard hashes/sizes, parent placement and
-ordering, manifest totals and release-record equality, overview zooms/layers,
-cell tile placement, layers/zooms and stable metadata. Extra immutable objects
-from other releases are allowed. It does not establish complete or
-navigation-grade geography.
+`audit_seamap.py` checks that the index lists all 65,536 cells (the App fails
+a download whose release lacks a cell), object and shard hashes/sizes, parent
+placement and ordering, manifest totals and release-record equality, overview
+zooms/layers, cell tile placement, layers/zooms, and each object's
+`dinghai:schemaVersion` and `dinghai:cell`. Extra immutable objects from other
+releases are allowed. It does not establish complete or navigation-grade
+geography.
 
 ## App integration boundary
 
@@ -406,15 +366,13 @@ It uses the official VersaTiles **5.7.0** CLI to remotely cut the published
 by bbox. It never downloads the whole container. The publisher's release-asset
 SHA-256 verifies the CLI distribution, and the executable must match that
 archive. Redirects are never followed, so the recorded URL is the URL actually
-read; the former `https://download.versatiles.org/satellite.versatiles` now
-answers 301 and is not used. Satellite currently has no dated URL in the
-publisher's satellite URL list
-(`https://download.versatiles.org/satellite-raster/urllist.tsv`). That list
+read. Satellite currently has no dated URL in the publisher's satellite URL
+list (`https://download.versatiles.org/satellite-raster/urllist.tsv`). That list
 also gives an MD5, which cannot be checked without downloading the whole
 container and is not recorded. The URL, strong HTTP ETag and full container
 byte length identify the snapshot in the estimate, every cell's metadata, and
-the immutable release record. Releases made before the move record the former
-URL and its ETag.
+the immutable release record. Releases made before the publisher moved the
+container record its former URL, `https://download.versatiles.org/satellite.versatiles`.
 
 Selection uses the same full-resolution `depth_product.py` land index and
 the App's XYZ z8 grid. Compute each cell's land fraction from polygon unions
@@ -496,8 +454,7 @@ For example, Hong Kong uses `manifest.index["13/6"]`. `cellCount` and
 The top-level `overview: {"sha256": "...", "bytes": N}` references the global
 **z0–6** object in the same objects directory. z7 is displayed by the App using
 z6; the producer does not synthesize z7. The source index for this snapshot has
-**5,461 tiles**, not the initial estimate's 21,461 (z0–6 can have at most
-1 + 4 + … + 4096 = 5,461 XYZ tiles). The resulting PMTiles is **90,528,164
+**5,461 tiles**, every z0–6 XYZ tile. The resulting PMTiles is **90,528,164
 bytes**. Every overview tile is copied without re-encoding from the same
 ETag-pinned source using the same verified CLI. Overview index counts and
 payload lengths are recorded in `state/overview-estimate.json`.

@@ -15,7 +15,7 @@ import struct
 import time
 
 from PIL import Image
-from audit_seamap import _varint, _zxy
+from audit_seamap import _varint, _zxy, check_release_name
 
 ATTRIBUTION = "VersaTiles sources (https://versatiles.org/sources/)"
 
@@ -123,6 +123,7 @@ def _audit(root, estimate, images):
                           ("attribution", ATTRIBUTION)):
         if manifest[key] != expected:
             raise ValueError(f"unexpected manifest {key}")
+    check_release_name(manifest["release"])
     if manifest["record"] != f"releases/{manifest['release']}.json":
         raise ValueError("invalid release record path")
     if (root / manifest["record"]).read_bytes() != manifest_bytes:

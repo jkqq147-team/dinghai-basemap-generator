@@ -100,6 +100,19 @@ class PublicationTests(unittest.TestCase):
             report = audit_satellite.audit(root)
             self.assertEqual((report["cellCount"], report["levels"]), (1, {8: 1, 10: 1}))
             self.assertEqual(report["overview"]["levels"], {z: 1 for z in range(7)})
+            # The App drops a whole manifest whose release is not [A-Za-z0-9][A-Za-z0-9._-]*.
+            manifest_bytes = (root / "manifest.json").read_bytes()
+            for name in ("has space", "_leading"):
+                with self.subTest(name=name):
+                    with self.assertRaisesRegex(ValueError, "invalid release name"):
+                        satellite.finalize(root, name, [], identity)
+                    renamed = dict(manifest, release=name, record=f"releases/{name}.json")
+                    payload = json.dumps(renamed).encode()
+                    (root / "manifest.json").write_bytes(payload)
+                    (root / renamed["record"]).write_bytes(payload)
+                    with self.assertRaisesRegex(ValueError, "invalid release name"):
+                        audit_satellite.audit(root)
+            (root / "manifest.json").write_bytes(manifest_bytes)
             # Changing immutable bytes must fail at the release audit, not pass on file existence.
             (root / "objects" / f"{sha}.pmtiles").write_bytes(data[:-1] + bytes([data[-1] ^ 1]))
             with self.assertRaisesRegex(ValueError, "SHA-256 mismatch"):

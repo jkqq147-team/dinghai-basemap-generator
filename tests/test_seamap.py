@@ -129,7 +129,31 @@ class SeamapCellTests(unittest.TestCase):
             sp.build(archive, provenance, root / "depth", "next", [(1, 2)], root / "out", root / "state")
             self.assertEqual((root / "out/releases/new.json").read_bytes(), before)
             self.assertEqual(json.loads((root / "out/manifest.json").read_bytes())["release"], "next")
-            self.assertEqual(audit_seamap.audit(root / "out")["cellCount"], 1)
+
+    def test_release_names_the_app_rejects_fail_finalize_and_audit(self):
+        # The App drops a whole manifest whose release is not [A-Za-z0-9][A-Za-z0-9._-]*;
+        # finalize only refused path separators and the audit never read the name.
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            provenance = _sources(root)
+            archive = root / "compiled.pmtiles"
+            sp.write_pmtiles(archive, {}, {}, (-180, -85, 180, 85), 0, 14)
+            manifest = sp.build(archive, provenance, root / "depth", "valid", [(1, 2)],
+                                root / "out", root / "state")
+            before = (root / "out/manifest.json").read_bytes()
+            for name in ("has space", "_leading"):
+                with self.subTest(name=name):
+                    with self.assertRaisesRegex(ValueError, "invalid release name"):
+                        sp.build(archive, provenance, root / "depth", name, [(1, 2)],
+                                 root / "out", root / "state")
+                    self.assertEqual((root / "out/manifest.json").read_bytes(), before)
+                    renamed = dict(manifest, release=name, record=f"releases/{name}.json")
+                    payload = json.dumps(renamed).encode()
+                    (root / "out/manifest.json").write_bytes(payload)
+                    (root / "out" / renamed["record"]).write_bytes(payload)
+                    with self.assertRaisesRegex(ValueError, "invalid release name"):
+                        audit_seamap.audit(root / "out")
+                    (root / "out/manifest.json").write_bytes(before)
 
     def test_pmtiles_gzip_headers_are_canonical_including_leaf_directories(self):
         # The writer owns gzip portability: nonzero timestamps/platform OS bytes in
@@ -178,8 +202,6 @@ class SeamapCellTests(unittest.TestCase):
                                 root / "out", root / "state")
 
             self.assertEqual(manifest["schemaVersion"], 3)
-            self.assertFalse({"cells", "cellsURL", "cellsBytes", "cellsSHA256"} & manifest.keys())
-            self.assertFalse(list((root / "out").rglob("cells.json")))
             self.assertEqual(manifest["record"], "releases/new.json")
             self.assertEqual((root / "out/releases/new.json").read_bytes(),
                              (root / "out/manifest.json").read_bytes())
@@ -222,7 +244,14 @@ class SeamapCellTests(unittest.TestCase):
             self.assertEqual(manifest["cellCount"], len(selected))
             _, _, none = audit_seamap.read_pmtiles(entries[empty])
             self.assertEqual(none, {})
-            self.assertEqual(audit_seamap.audit(root / "out")["cellCount"], len(selected))
+            # The App fails a Seamap download whose index lacks any z8 cell, so a release
+            # of selected cells must not pass the publication audit; its objects must.
+            with self.assertRaisesRegex(ValueError, "incomplete grid: 65530 of 65536 cells missing"):
+                audit_seamap.audit(root / "out")
+            for (x, y), data in entries.items():
+                report = audit_seamap.audit_cell(data, x, y)
+                self.assertEqual(report["features"], {"depth": 1, "seamark": 1} if (x, y) == cell else {})
+            self.assertEqual(audit_seamap.audit_overview(overview_path.read_bytes())["tiles"], 1)
 
 
 if __name__ == "__main__":

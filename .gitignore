@@ -10,3 +10,16 @@ __pycache__/
 .DS_Store
 /planetiler/target/
 /prod/
+# Production inputs and outputs of the README rebuild, run from the repository root.
+*.pmtiles
+*.osm.pbf
+*.nc
+!/tests/fixtures/gebco-fractional.nc
+*.versatiles
+*.mbtiles
+/land-polygons-complete/
+/pilot/
+/depth/
+/out/
+/state/
+/provenance.json

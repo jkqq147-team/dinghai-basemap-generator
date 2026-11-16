@@ -31,6 +31,7 @@ from pmtiles.tile import (
 from pmtiles.writer import optimize_directories
 
 import depth_product
+from audit_seamap import check_release_name
 
 VERSION = "seamap-cell-3"
 SCHEMA_VERSION = 3
@@ -419,8 +420,7 @@ def build(archive_path, provenance, depth_dir, release, cells, output, state_dir
 
 def finalize(output, release, entries, identity, overview):
     output = Path(output)
-    if not release or release in (".", "..") or "/" in release or "\\" in release:
-        raise ValueError("release must be a single filename component")
+    check_release_name(release)
     shards = defaultdict(list)
     seen = set()
     for entry in sorted(entries, key=lambda entry: (entry["x"], entry["y"])):
@@ -444,7 +444,7 @@ def finalize(output, release, entries, identity, overview):
     sources["gebco"] = {key: depth["gebco"][key] for key in ("grid", "doi", "bytes", "sha256", "coverage")}
     sources["seamapPMTiles"] = {"sha256": identity["archiveSHA256"], "generator": "Planetiler 0.10.2 seamap-osm-2"}
     manifest = {
-        "id": "dinghai-seamap", "manifestVersion": 1, "release": release, "schemaVersion": SCHEMA_VERSION,
+        "id": "dinghai-seamap", "release": release, "schemaVersion": SCHEMA_VERSION,
         "gridZoom": GRID_ZOOM, "minimumZoom": MIN_ZOOM, "maximumZoom": MAX_ZOOM, "layers": list(LAYERS),
         "sources": sources, "attribution": ATTRIBUTION,
         "depth": {"thresholdMeters": depth["params"]["bandsMeters"][0], **depth["params"],
