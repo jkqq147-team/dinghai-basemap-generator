@@ -23,9 +23,11 @@ seamap.pmtiles ─ seamap_product.py ─┬─ objects/<sha256>.pmtiles   overvi
                                   └─ manifest.json            only mutable publication pointer
 ```
 
-No Protomaps build, no per-cell merge of a second product and no third-party
-Seamap archive is read, redistributed or credited. Tiles are copied from the
-compiled archive into the overview and cells, never re-encoded.
+There is no Protomaps build or merge with a second basemap; no third-party
+Seamap archive is read, redistributed or credited. The overview and cells
+keep the compiled MVT bytes unchanged and rebuild only the tiles' gzip
+wrapping in canonical form. The separate satellite product keeps the
+original WebP bytes unchanged from one ETag-pinned VersaTiles snapshot.
 
 | File | Role |
 | --- | --- |
@@ -246,11 +248,12 @@ LAND=land-polygons-complete/land-polygons-complete-4326/land_polygons.shp
 .venv/bin/python depth_product.py index --land $LAND --output land-index.sqlite
 .venv/bin/python depth_product.py build --gebco GEBCO_2026.nc --gebco-grid GEBCO_2026 \
   --land-index land-index.sqlite --output depth --all-cells --jobs 12
+planetiler_tmpdir=$(mktemp -d /tmp/dinghai-seamap-planetiler.XXXXXX) &&
 java -Xmx24g -jar planetiler/target/dinghai-seamap-compiler-1.0.0.jar \
   --osm=planet-YYMMDD.osm.pbf \
   --osm_url=https://planet.openstreetmap.org/pbf/planet-YYMMDD.osm.pbf \
   --land=$LAND --depth=depth --output=seamap.pmtiles \
-  --minzoom=0 --maxzoom=14 --threads=12 --tmpdir=/tmp/dinghai-seamap-planetiler
+  --minzoom=0 --maxzoom=14 --threads=12 --tmpdir="$planetiler_tmpdir"
 .venv/bin/python seamap_product.py --archive seamap.pmtiles --provenance provenance.json \
   --depth depth --release YYYYMMDD --all-cells --output out --state-dir state --jobs 8
 .venv/bin/python audit_seamap.py out
@@ -266,8 +269,8 @@ combines extracts):
 }
 ```
 
-Use a different `--tmpdir` for every concurrent compiler; Planetiler deletes
-and recreates it. The compiler forces exact global Web-Mercator bounds and
+Use a unique `--tmpdir` for every Planetiler run; Planetiler deletes and
+recreates it. The compiler forces exact global Web-Mercator bounds and
 rejects regional `--bounds`: Planetiler 0.10.2's GeoTools Shapefile bbox
 filter returned zero features for these WGS84 polygons. For a pilot,
 pre-clip the OSM input (`osmium extract --strategy=smart -p region.geojson`)
@@ -289,8 +292,9 @@ Only after every selected cell succeeds does finalize publish the shards and an
 immutable release record, then atomically replace `manifest.json`. Repeating an
 identical release is safe; trying to reuse its name with different manifest bytes
 fails without moving the pointer. A release name must match
-`[A-Za-z0-9][A-Za-z0-9._-]*`, the App's rule for both products; finalize and
-both audits reject any other name. Existing objects and shards may be shared
+`[A-Za-z0-9][A-Za-z0-9._-]*`, the App's rule for both products. Both builds
+reject any other name before reading inputs or creating state; finalize and
+both audits enforce the same rule. Existing objects and shards may be shared
 by multiple releases and are never pruned here.
 
 ### Global overview check (2026-11-03)
@@ -336,9 +340,11 @@ publication. Even an empty selected cell gets a PMTiles object and an index row.
 Object metadata retains stable schema, cell coordinates, attribution, licences,
 GEBCO DOI and the illustrative-depth warning, but no release, source snapshot
 URL/date/hash/bytes, generator identity or depth-generation parameters. These
-belong in the manifest and its immutable release record. Every gzip member
-(tiles, metadata, root and leaf directories) has mtime 0 and OS byte 255.
-Index JSON uses fixed compact separators and sorted rows before hashing.
+belong in the manifest and its immutable release record. Seamap tile payloads
+are byte-for-byte identical to the compiled MVT once unwrapped from gzip.
+Every gzip member (tiles, metadata, root and leaf directories) has mtime 0 and
+OS byte 255. Index JSON uses fixed compact separators and sorted rows before
+hashing.
 
 `audit_seamap.py` checks that the index lists all 65,536 cells (the App fails
 a download whose release lacks a cell), object and shard hashes/sizes, parent

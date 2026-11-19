@@ -50,6 +50,16 @@ class CoastalSelectionTests(unittest.TestCase):
 
 
 class PublicationTests(unittest.TestCase):
+    def test_build_rejects_invalid_release_before_reading_inputs_or_creating_dirs(self):
+        # A direct finalize check misses estimate/CLI reads from build before name rejection.
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            with self.assertRaisesRegex(ValueError, "invalid release name"):
+                satellite.build(root / "estimate.json", root / "versatiles", root / "verification.json",
+                                ".bad", root / "out", root / "state", root / "cache")
+            self.assertFalse((root / "state").exists())
+            self.assertFalse((root / "out").exists())
+
     def test_raster_release_preserves_source_blobs_and_missing_levels_at_public_boundary(self):
         # Existing Seamap tests only cover MVT: re-encoding, filled gaps or lost overview zooms breaks this copy contract.
         with tempfile.TemporaryDirectory() as tmp:
@@ -104,8 +114,6 @@ class PublicationTests(unittest.TestCase):
             manifest_bytes = (root / "manifest.json").read_bytes()
             for name in ("has space", "_leading"):
                 with self.subTest(name=name):
-                    with self.assertRaisesRegex(ValueError, "invalid release name"):
-                        satellite.finalize(root, name, [], identity)
                     renamed = dict(manifest, release=name, record=f"releases/{name}.json")
                     payload = json.dumps(renamed).encode()
                     (root / "manifest.json").write_bytes(payload)

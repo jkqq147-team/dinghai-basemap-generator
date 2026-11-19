@@ -370,6 +370,7 @@ def finalize(output, release, entries, identity):
 
 
 def build(estimate_path, cli, verification, release, output, state_dir, cache, jobs=4):
+    check_release_name(release)
     if not 1 <= jobs <= 4:
         raise ValueError("jobs must be between 1 and 4")
     plan = json.loads(Path(estimate_path).read_text())

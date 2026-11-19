@@ -130,9 +130,18 @@ class SeamapCellTests(unittest.TestCase):
             self.assertEqual((root / "out/releases/new.json").read_bytes(), before)
             self.assertEqual(json.loads((root / "out/manifest.json").read_bytes())["release"], "next")
 
-    def test_release_names_the_app_rejects_fail_finalize_and_audit(self):
-        # The App drops a whole manifest whose release is not [A-Za-z0-9][A-Za-z0-9._-]*;
-        # finalize only refused path separators and the audit never read the name.
+    def test_build_rejects_invalid_release_before_reading_inputs_or_creating_dirs(self):
+        # Finalize-time rejection lets a missing provenance mask the name error and leaves state behind.
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            with self.assertRaisesRegex(ValueError, "invalid release name"):
+                sp.build(root / "compiled.pmtiles", root / "provenance.json", root / "depth",
+                         ".bad", [(1, 2)], root / "out", root / "state")
+            self.assertFalse((root / "state").exists())
+            self.assertFalse((root / "out").exists())
+
+    def test_audit_rejects_release_names_the_app_rejects(self):
+        # The App drops a whole manifest whose release is not [A-Za-z0-9][A-Za-z0-9._-]*.
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             provenance = _sources(root)
@@ -140,20 +149,14 @@ class SeamapCellTests(unittest.TestCase):
             sp.write_pmtiles(archive, {}, {}, (-180, -85, 180, 85), 0, 14)
             manifest = sp.build(archive, provenance, root / "depth", "valid", [(1, 2)],
                                 root / "out", root / "state")
-            before = (root / "out/manifest.json").read_bytes()
             for name in ("has space", "_leading"):
                 with self.subTest(name=name):
-                    with self.assertRaisesRegex(ValueError, "invalid release name"):
-                        sp.build(archive, provenance, root / "depth", name, [(1, 2)],
-                                 root / "out", root / "state")
-                    self.assertEqual((root / "out/manifest.json").read_bytes(), before)
                     renamed = dict(manifest, release=name, record=f"releases/{name}.json")
                     payload = json.dumps(renamed).encode()
                     (root / "out/manifest.json").write_bytes(payload)
                     (root / "out" / renamed["record"]).write_bytes(payload)
                     with self.assertRaisesRegex(ValueError, "invalid release name"):
                         audit_seamap.audit(root / "out")
-                    (root / "out/manifest.json").write_bytes(before)
 
     def test_pmtiles_gzip_headers_are_canonical_including_leaf_directories(self):
         # The writer owns gzip portability: nonzero timestamps/platform OS bytes in

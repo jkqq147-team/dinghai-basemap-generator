@@ -377,6 +377,7 @@ def _identity(archive_path, provenance_path, depth_dir):
 
 
 def build(archive_path, provenance, depth_dir, release, cells, output, state_dir, jobs=1):
+    check_release_name(release)
     output, state_dir = Path(output), Path(state_dir)
     state_dir.mkdir(parents=True, exist_ok=True)
     identity = _identity(archive_path, provenance, depth_dir)
