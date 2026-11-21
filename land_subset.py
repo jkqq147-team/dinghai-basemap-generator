@@ -19,7 +19,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("input", type=Path, help="extracted global land_polygons.shp")
     parser.add_argument("output", type=Path, help="output land_polygons.shp")
-    parser.add_argument("--bbox", action="append", required=True, help="west,south,east,north; repeatable")
+    parser.add_argument("--bbox", action="append", required=True, help="west,south,east,north; repeatable; write --bbox=W,S,E,N (a leading minus after a space is read as an option)")
     args = parser.parse_args()
     boxes = [tuple(float(value) for value in text.split(",")) for text in args.bbox]
     args.output.parent.mkdir(parents=True, exist_ok=True)

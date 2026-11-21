@@ -275,7 +275,7 @@ rejects regional `--bounds`: Planetiler 0.10.2's GeoTools Shapefile bbox
 filter returned zero features for these WGS84 polygons. For a pilot,
 pre-clip the OSM input (`osmium extract --strategy=smart -p region.geojson`)
 and the land polygons (`land_subset.py land_polygons.shp pilot/land_polygons.shp
---bbox W,S,E,N …`), build depth only for the pilot cells (`--cell X/Y`), and
+--bbox=W,S,E,N …`), build depth only for the pilot cells (`--cell X/Y`), and
 slice with `--cell X/Y`. The overview of a pilot covers only its region. A
 pilot is a local experiment only: it lacks cells, so `audit_seamap.py` rejects
 it, and it is never published.
