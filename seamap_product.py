@@ -3,8 +3,8 @@
 """Cut the DingHai Seamap Planetiler archive into content-addressed overview and z8 cells (v3).
 
 The archive (planetiler/, one OSM snapshot + OSM land polygons + depth_product.py's
-GEBCO depth Shapefiles) holds land/water at z0-14, seamark/wetland/sea_area at z8-14
-and landuse/roads/peaks/places/depth at z8-12. Its z0-7 tiles become one overview
+GEBCO depth Shapefiles) holds land/water at z0-14, seamark/wetland/sea_area at z8-14,
+landuse/roads/places/depth at z8-12 and peaks at z11-12. Its z0-7 tiles become one overview
 PMTiles; every selected z8 cell gets one object with its z8-14 tiles and a bytes/SHA-256
 entry in its z4 index shard. Tiles are copied, never merged or re-encoded. No network or
 third-party archive is read.
@@ -41,15 +41,23 @@ OSM_LAYERS = ("seamark", "land", "water", "wetland", "sea_area")
 LAND_LAYERS = ("landuse", "roads", "peaks", "places", "depth")
 LAYERS = OSM_LAYERS + LAND_LAYERS
 LAYER_MAX_ZOOM = {name: 14 if name in OSM_LAYERS else 12 for name in LAYERS}
+# First zoom SeamapCompiler emits into a cell. Peaks start at 11; secondary roads
+# and some place kinds start later, but those layers still have features from z8.
+# Land and lakes also exist at z0-7, in the overview, not in a cell.
+LAYER_MIN_ZOOM = {name: 11 if name == "peaks" else MIN_ZOOM for name in LAYERS}
 OVERVIEW_MAX_ZOOM = MIN_ZOOM - 1
 OVERVIEW_LAYERS = ("land", "water")
+# Attributes SeamapCompiler writes. dh_clearance* are metres (Number), not the OSM strings.
 FIELDS = {
     "seamark": {"type": "String", "category": "String", "shape": "String", "color": "String",
                 "color_pattern": "String", "topmark_shape": "String", "topmark_color": "String",
                 "light_color": "String", "family": "String", "osm_id": "Number", "zoom": "Number",
                 "dh_sectors": "String", "dh_light_colour": "String",
                 "dh_allround_colour": "String",
-                "name": "String", "name:zh": "String", "name:zh-Hans": "String", "seamark:*": "String"},
+                "dh_clearance": "Number", "dh_clearance_safe": "Number",
+                "dh_clearance_closed": "Number", "dh_clearance_open": "Number",
+                "name": "String", "name:zh": "String", "name:zh-Hans": "String", "function": "String",
+                "seamark:*": "String"},
     "land": {},
     "water": {"name": "String", "water": "String"},
     "wetland": {"type": "String", "category": "String", "name": "String", "surface": "String"},
@@ -280,7 +288,7 @@ def _metadata(cx, cy, identity):
         "dinghai:depthAttribution": depth["gebco"]["attribution"], "dinghai:depthDOI": depth["gebco"]["doi"],
         "dinghai:depthTermsURL": depth["gebco"]["termsURL"], "dinghai:depthNotice": depth["notice"],
         "dinghai:gebcoGrid": depth["gebco"]["grid"],
-        "vector_layers": [{"id": name, "fields": FIELDS[name], "minzoom": MIN_ZOOM,
+        "vector_layers": [{"id": name, "fields": FIELDS[name], "minzoom": LAYER_MIN_ZOOM[name],
                            "maxzoom": LAYER_MAX_ZOOM[name]} for name in LAYERS],
     }
 

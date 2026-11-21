@@ -19,6 +19,32 @@ import seamap_product as sp
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
+# SeamapCompiler's cell schema (README layer table): every attribute it can write,
+# and the zoom a layer first appears in a cell. Peaks start at 11; secondary roads
+# and some place kinds start later, but those layers still have features from z8.
+CELL_VECTOR_LAYERS = [
+    {"id": "seamark", "fields": {
+        "type": "String", "category": "String", "shape": "String", "color": "String",
+        "color_pattern": "String", "topmark_shape": "String", "topmark_color": "String",
+        "light_color": "String", "family": "String", "osm_id": "Number", "zoom": "Number",
+        "dh_sectors": "String", "dh_light_colour": "String", "dh_allround_colour": "String",
+        "dh_clearance": "Number", "dh_clearance_safe": "Number",
+        "dh_clearance_closed": "Number", "dh_clearance_open": "Number",
+        "name": "String", "name:zh": "String", "name:zh-Hans": "String", "function": "String",
+        "seamark:*": "String"}, "minzoom": 8, "maxzoom": 14},
+    {"id": "land", "fields": {}, "minzoom": 8, "maxzoom": 14},
+    {"id": "water", "fields": {"name": "String", "water": "String"}, "minzoom": 8, "maxzoom": 14},
+    {"id": "wetland", "fields": {"type": "String", "category": "String", "name": "String", "surface": "String"},
+     "minzoom": 8, "maxzoom": 14},
+    {"id": "sea_area", "fields": {"category": "String", "name": "String", "name:zh": "String",
+                                  "name:zh-Hans": "String"}, "minzoom": 8, "maxzoom": 14},
+    {"id": "landuse", "fields": {"class": "String"}, "minzoom": 8, "maxzoom": 12},
+    {"id": "roads", "fields": {"class": "String"}, "minzoom": 8, "maxzoom": 12},
+    {"id": "peaks", "fields": {"ele": "Number"}, "minzoom": 11, "maxzoom": 12},
+    {"id": "places", "fields": {"kind": "String", "name": "String"}, "minzoom": 8, "maxzoom": 12},
+    {"id": "depth", "fields": {"min": "Number"}, "minzoom": 8, "maxzoom": 12},
+]
+
 
 def _tile(name, geometry, properties):
     return gzip.compress(mvt.encode([{"name": name, "features": [
@@ -185,8 +211,9 @@ class SeamapCellTests(unittest.TestCase):
     def test_overview_and_every_selected_cell_are_files_with_their_compiled_tiles(self):
         # Protects the App's file contract at the release boundary: the z0-7 tiles form the
         # global overview, a cell carries its z14 marine and z12 land/depth tiles unchanged and
-        # declares zoom ranges; v3 shards address every selected cell (even empty),
-        # with compact hashed rows sorted into their z4 parents instead of a global inventory.
+        # declares the compiler's fields and per-layer zooms; v3 shards address every selected
+        # cell (even empty), with compact hashed rows sorted into their z4 parents instead of
+        # a global inventory.
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             cell, empty = (1, 2), (17, 16)
@@ -231,10 +258,8 @@ class SeamapCellTests(unittest.TestCase):
             seamark = decoded[(14, 67, 132)]["seamark"]["features"][0]["properties"]
             self.assertEqual((seamark["type"], seamark["light_color"], seamark["osm_id"]),
                              ("light_major", "red", 123))
-            layers = {layer["id"]: layer for layer in metadata["vector_layers"]}
-            self.assertEqual(layers["landuse"]["fields"], {"class": "String"})
-            self.assertEqual((layers["depth"]["minzoom"], layers["depth"]["maxzoom"]), (8, 12))
-            self.assertEqual((layers["seamark"]["minzoom"], layers["seamark"]["maxzoom"]), (8, 14))
+            # Whole declaration: omitted dh_clearance* or peaks starting at z8 must fail.
+            self.assertEqual(metadata["vector_layers"], CELL_VECTOR_LAYERS)
             self.assertIn("不可用于导航", metadata["dinghai:depthNotice"])
 
             overview_path = root / "out/objects" / (manifest["overview"]["sha256"] + ".pmtiles")
