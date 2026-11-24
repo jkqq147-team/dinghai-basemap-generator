@@ -58,10 +58,10 @@ independent of the release label.
 
 | Cell layer | Zooms | OSM rule (this repository's own) | Fields |
 | --- | --- | --- | --- |
-| `seamark` | 8–14 | every `seamark:type`, nodes, ways and areas alike (overhead cables and pipelines are ways); piers, breakwaters, groynes, quays, wharves, pontoons from `man_made` | original `seamark:*`, names and `function`; `osm_id`, tile `zoom`; normalized `type`, `category`, `shape`, `color`, `color_pattern`, `topmark_shape`, `topmark_color`, `light_color`, `family`; on seamarks with numbered or sector lights, nodes or ways alike, `dh_sectors`, `dh_light_colour`, `dh_allround_colour` (below); on bridges, overhead cables and overhead pipelines, `dh_clearance`, `dh_clearance_safe`, `dh_clearance_closed`, `dh_clearance_open` (below) |
+| `seamark` | 8–14 | every `seamark:type`, nodes, ways and areas alike (overhead cables and pipelines are ways); piers, breakwaters, groynes, quays, wharves, pontoons from `man_made` | original `seamark:*`, names and `function`; `osm_id`; normalized `type`, `category`, `shape`, `color`, `color_pattern`, `topmark_shape`, `topmark_color`, `light_color`, `family`; on seamarks with numbered or sector lights, nodes or ways alike, `dh_sectors`, `dh_light_colour`, `dh_allround_colour` (below); on bridges, overhead cables and overhead pipelines, `dh_clearance`, `dh_clearance_safe`, `dh_clearance_closed`, `dh_clearance_open` (below) |
 | `land` | 8–14 | `land-polygons-complete-4326` | none: fill and coastline stroke |
 | `water` | 8–14 | `natural=water`, `waterway=riverbank`, `landuse=reservoir/basin`, `water=reservoir/basin/water` | `name`, `water` |
-| `wetland` | 8–14 | `natural=wetland` + mangrove/tidalflat/saltmarsh | `type=wetland`, `category`, `name`, `surface` |
+| `wetland` | 8–14 | `natural=wetland` + mangrove/tidalflat/saltmarsh | `type=wetland`, `category`, `name` |
 | `sea_area` | 8–14 | `place=sea`, `natural=bay`; polygons labelled at a point on surface | `category`, `name`, `name:zh`, `name:zh-Hans` |
 | `landuse` | 8–12 | `landuse`, `leisure`, `natural` mapped to wood/park/farmland/urban/industrial/beach; ≥ 2 px; merged by class per tile, then clipped to the tile's `land` | `class` |
 | `roads` | 8–12 | `highway=motorway(_link)` → highway; trunk/primary(_link) → major; secondary/tertiary(_link) → secondary from z11; merged by class per tile | `class` |

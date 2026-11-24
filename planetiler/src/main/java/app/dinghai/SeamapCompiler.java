@@ -13,7 +13,6 @@ import com.onthegomap.planetiler.geo.GeometryException;
 import com.onthegomap.planetiler.geo.TileCoord;
 import com.onthegomap.planetiler.reader.SourceFeature;
 import com.onthegomap.planetiler.util.Parse;
-import com.onthegomap.planetiler.util.ZoomFunction;
 import java.math.BigDecimal;
 import java.math.BigInteger;
 import java.math.RoundingMode;
@@ -128,7 +127,7 @@ public final class SeamapCompiler implements Profile {
   }
 
   private static Feature copyTags(Feature feature, SourceFeature source) {
-    feature.setAttr("osm_id", source.id()).setAttr("zoom", (ZoomFunction<Integer>) zoom -> zoom);
+    feature.setAttr("osm_id", source.id());
     for (var tag : source.tags().entrySet()) {
       String key = tag.getKey();
       if (key.startsWith("seamark:") || key.equals("name") || key.equals("name:zh") ||
@@ -393,7 +392,7 @@ public final class SeamapCompiler implements Profile {
     if (source.canBePolygon() && "wetland".equals(natural) && wetland != null && COASTAL_WETLAND.contains(wetland)) {
       Feature feature = features.polygon("wetland").setZoomRange(MIN_ZOOM, MAX_ZOOM)
         .setAttr("type", "wetland").setAttr("category", wetland).setMinPixelSizeAtAllZooms(0);
-      feature.inheritAttrsFromSource("name", "surface");
+      feature.inheritAttrsFromSource("name");
     }
 
     String place = value(source, "place");

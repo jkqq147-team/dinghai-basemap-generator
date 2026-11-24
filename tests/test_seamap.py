@@ -26,7 +26,7 @@ CELL_VECTOR_LAYERS = [
     {"id": "seamark", "fields": {
         "type": "String", "category": "String", "shape": "String", "color": "String",
         "color_pattern": "String", "topmark_shape": "String", "topmark_color": "String",
-        "light_color": "String", "family": "String", "osm_id": "Number", "zoom": "Number",
+        "light_color": "String", "family": "String", "osm_id": "Number",
         "dh_sectors": "String", "dh_light_colour": "String", "dh_allround_colour": "String",
         "dh_clearance": "Number", "dh_clearance_safe": "Number",
         "dh_clearance_closed": "Number", "dh_clearance_open": "Number",
@@ -34,7 +34,7 @@ CELL_VECTOR_LAYERS = [
         "seamark:*": "String"}, "minzoom": 8, "maxzoom": 14},
     {"id": "land", "fields": {}, "minzoom": 8, "maxzoom": 14},
     {"id": "water", "fields": {"name": "String", "water": "String"}, "minzoom": 8, "maxzoom": 14},
-    {"id": "wetland", "fields": {"type": "String", "category": "String", "name": "String", "surface": "String"},
+    {"id": "wetland", "fields": {"type": "String", "category": "String", "name": "String"},
      "minzoom": 8, "maxzoom": 14},
     {"id": "sea_area", "fields": {"category": "String", "name": "String", "name:zh": "String",
                                   "name:zh-Hans": "String"}, "minzoom": 8, "maxzoom": 14},

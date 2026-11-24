@@ -51,7 +51,7 @@ OVERVIEW_LAYERS = ("land", "water")
 FIELDS = {
     "seamark": {"type": "String", "category": "String", "shape": "String", "color": "String",
                 "color_pattern": "String", "topmark_shape": "String", "topmark_color": "String",
-                "light_color": "String", "family": "String", "osm_id": "Number", "zoom": "Number",
+                "light_color": "String", "family": "String", "osm_id": "Number",
                 "dh_sectors": "String", "dh_light_colour": "String",
                 "dh_allround_colour": "String",
                 "dh_clearance": "Number", "dh_clearance_safe": "Number",
@@ -60,7 +60,7 @@ FIELDS = {
                 "seamark:*": "String"},
     "land": {},
     "water": {"name": "String", "water": "String"},
-    "wetland": {"type": "String", "category": "String", "name": "String", "surface": "String"},
+    "wetland": {"type": "String", "category": "String", "name": "String"},
     "sea_area": {"category": "String", "name": "String", "name:zh": "String", "name:zh-Hans": "String"},
     "landuse": {"class": "String"}, "roads": {"class": "String"}, "peaks": {"ele": "Number"},
     "places": {"kind": "String", "name": "String"}, "depth": {"min": "Number"},
